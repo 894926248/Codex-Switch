@@ -1,0 +1,9 @@
+Patch replay log
+
+[1/113] 2026-02-16T10:26:39.0000000Z call_hcBGUlehrRikzH5Jz9HWxUq7 rollout-2026-02-17T02-08-28-019c67a3-b747-7ea3-ae7d-e1e2002ac4e5.jsonl
+FAILED with exit 1
+STDOUT:
+
+STDERR:
+Invalid patch: The first line of the patch must be '*** Begin Patch'
+

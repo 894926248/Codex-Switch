@@ -1,0 +1,41 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local recovery/debug artifacts
+__recover_2000/
+__restore_backup/
+__cand_call_*.txt
+__recover_*.txt
+__replay_log_*.log
+__timeline_*.log
+__tmp_*.js
+__tmp_*.cjs
+tmp_*.png
+*.bak
+
+# Local release artifacts
+release/
+release-assets/
+schema_tmp/

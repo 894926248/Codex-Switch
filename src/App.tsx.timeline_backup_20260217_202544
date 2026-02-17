@@ -1,0 +1,712 @@
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  KeyboardSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import "./App.css";
+
+type MaybeNum = number | null | undefined;
+
+interface CurrentStatusView {
+  email?: string | null;
+  workspaceName?: string | null;
+  workspaceId?: string | null;
+  displayWorkspace: string;
+  fiveHourRemainingPercent?: number | null;
+  fiveHourResetsAt?: number | null;
+  oneWeekRemainingPercent?: number | null;
+  oneWeekResetsAt?: number | null;
+}
+
+interface ProfileView {
+  name: string;
+  email?: string | null;
+  workspaceName?: string | null;
+  workspaceId?: string | null;
+  workspaceAlias?: string | null;
+  displayWorkspace: string;
+  fiveHourRemainingPercent?: number | null;
+  fiveHourResetsAt?: number | null;
+  oneWeekRemainingPercent?: number | null;
+  oneWeekResetsAt?: number | null;
+  lastCheckedAt?: string | null;
+  lastError?: string | null;
+  status: string;
+  isActive: boolean;
+}
+
+interface DashboardData {
+  appName: string;
+  activeProfile?: string | null;
+  current?: CurrentStatusView | null;
+  currentError?: string | null;
+  profiles: ProfileView[];
+}
+
+function formatCurrentErrorWithProfile(data: Pick<DashboardData, "activeProfile" | "profiles"> | null, raw?: string | null): string | null {
+  if (!raw) {
+    return null;
+  }
+  if (!data?.activeProfile) {
+    return raw;
+  }
+  const idx = data.profiles.findIndex((p) => p.name === data.activeProfile);
+  if (idx < 0) {
+    return raw;
+  }
+  const profile = data.profiles[idx];
+  return `账号 #${idx + 1} (${profile.displayWorkspace}): ${raw}`;
+}
+
+const AUTO_KEEPALIVE_BASE_MS = 48 * 60 * 60 * 1000;
+const AUTO_KEEPALIVE_JITTER_RATIO = 0.2;
+const AUTO_KEEPALIVE_MIN_MS = 5 * 60 * 1000;
+
+function nextAutoDelayMs() {
+  const jitter = Math.floor(AUTO_KEEPALIVE_BASE_MS * AUTO_KEEPALIVE_JITTER_RATIO);
+  const randomized = AUTO_KEEPALIVE_BASE_MS + Math.floor((Math.random() * 2 - 1) * jitter);
+  return Math.max(AUTO_KEEPALIVE_MIN_MS, randomized);
+}
+
+function formatReset(ts: MaybeNum): string {
+  if (!ts || Number.isNaN(ts)) {
+    return "-";
+  }
+  const d = new Date(ts * 1000);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${mm}-${dd} ${hh}:${mi}`;
+}
+
+function formatCheckedAt(value?: string | null): string {
+  if (!value) {
+    return "-";
+  }
+  const text = value.trim();
+  if (!text) {
+    return "-";
+  }
+
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/.exec(text);
+  if (m) {
+    const ss = m[6] || "00";
+    return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${ss}`;
+  }
+
+  const d = new Date(text);
+  if (!Number.isNaN(d.getTime())) {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+  }
+
+  return text.replace("T", " ").replace("Z", "");
+}
+
+function pct(v: MaybeNum): string {
+  if (v === undefined || v === null) {
+    return "-";
+  }
+  return `${v}%`;
+}
+
+function statusClass(text: string): string {
+  if (text.includes("受限") || text.includes("无权限")) {
+    return "warn";
+  }
+  return text.includes("失效") ? "bad" : "good";
+}
+
+interface SortableProfileCardProps {
+  profile: ProfileView;
+  index: number;
+  selected: boolean;
+  busy: boolean;
+  onSelect: (name: string) => void;
+  onRefreshQuota: (name: string) => void;
+  onApply: (name: string) => void;
+  onSetAlias: (name: string) => void;
+  onDelete: (name: string) => void;
+}
+
+function SortableProfileCard({
+  profile,
+  index,
+  selected,
+  busy,
+  onSelect,
+  onRefreshQuota,
+  onApply,
+  onSetAlias,
+  onDelete,
+}: SortableProfileCardProps) {
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({
+    id: profile.name,
+  });
+
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    animationDelay: `${Math.min(index * 45, 320)}ms`,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className={`sortable-item ${isDragging ? "sorting-item-dragging" : ""}`}>
+      <article
+        className={`profile-card ${selected ? "selected" : ""} ${profile.isActive ? "active" : ""} ${
+          isDragging ? "dragging-source" : ""
+        }`}
+        onClick={() => onSelect(profile.name)}
+      >
+        <button
+          type="button"
+          className="card-left-icon drag-handle"
+          title="拖拽调整顺序"
+          aria-label={`拖拽调整顺序: ${profile.displayWorkspace}`}
+          onClick={(e) => e.stopPropagation()}
+          {...attributes}
+          {...listeners}
+        >
+          ⋮⋮
+        </button>
+        <div className="card-main">
+          <div className="workspace-title">
+            <span className="profile-no">#{index + 1}</span>
+            <span className="workspace-name">{profile.displayWorkspace}</span>
+          </div>
+          <div className="email-line">{profile.email || "-"}</div>
+          <div className="quota-line">
+            <span className="quota-pill">
+              <strong>5小时</strong>
+              <b>{pct(profile.fiveHourRemainingPercent)}</b>
+              <small>{formatReset(profile.fiveHourResetsAt)}</small>
+            </span>
+            <span className="quota-pill">
+              <strong>1周</strong>
+              <b>{pct(profile.oneWeekRemainingPercent)}</b>
+              <small>{formatReset(profile.oneWeekResetsAt)}</small>
+            </span>
+          </div>
+          <div className="meta-line">最近刷新: {formatCheckedAt(profile.lastCheckedAt)}</div>
+        </div>
+        <div className="card-side">
+          <div className="status-row">
+            <span className={`status-pill ${statusClass(profile.status)}`}>{profile.status}</span>
+            <button
+              className="mini-icon"
+              disabled={busy}
+              title="刷新此账号额度"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRefreshQuota(profile.name);
+              }}
+            >
+              ↻
+            </button>
+          </div>
+          <div className="action-rail">
+            <button
+              className="card-action primary"
+              disabled={busy || profile.isActive}
+              onClick={(e) => {
+                e.stopPropagation();
+                onApply(profile.name);
+              }}
+            >
+              {profile.isActive ? "使用中" : "使用"}
+            </button>
+            <button
+              className="card-action"
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSetAlias(profile.name);
+              }}
+            >
+              改名
+            </button>
+            <button
+              className="card-action danger"
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete(profile.name);
+              }}
+            >
+              删除
+            </button>
+          </div>
+        </div>
+      </article>
+    </div>
+  );
+}
+
+function App() {
+  const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [displayProfiles, setDisplayProfiles] = useState<ProfileView[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [statusText, setStatusText] = useState("就绪");
+  const [busy, setBusy] = useState(false);
+  const [autoKeepalive, setAutoKeepalive] = useState(true);
+
+  const autoTimerRef = useRef<number | null>(null);
+  const autoRunningRef = useRef(false);
+  const autoEnabledRef = useRef(true);
+  const sortSavingRef = useRef(false);
+  const pendingSortNamesRef = useRef<string[] | null>(null);
+
+  const applyDashboard = useCallback((data: DashboardData, msg?: string) => {
+    setDashboard(data);
+    setDisplayProfiles(data.profiles);
+    setSelected((prev) => {
+      if (prev && data.profiles.some((p) => p.name === prev)) {
+        return prev;
+      }
+      if (data.activeProfile && data.profiles.some((p) => p.name === data.activeProfile)) {
+        return data.activeProfile;
+      }
+      return data.profiles[0]?.name ?? null;
+    });
+    if (msg) {
+      setStatusText(msg);
+    }
+  }, []);
+
+  const loadDashboard = useCallback(
+    async (syncCurrent = true, msg?: string) => {
+      setBusy(true);
+      try {
+        const data = await invoke<DashboardData>("load_dashboard", { syncCurrent });
+        applyDashboard(data, msg);
+        if (data.currentError) {
+          const detail = formatCurrentErrorWithProfile(data, data.currentError) ?? data.currentError;
+          setStatusText(`当前账号读取失败: ${detail}`);
+        }
+      } catch (err) {
+        setStatusText(`加载失败: ${String(err)}`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [applyDashboard],
+  );
+
+  useEffect(() => {
+    void loadDashboard(true, "已加载");
+  }, [loadDashboard]);
+
+  const selectedProfile = useMemo(
+    () => dashboard?.profiles.find((p) => p.name === selected) ?? null,
+    [dashboard, selected],
+  );
+
+  const profileNoMap = useMemo(() => {
+    const map = new Map<string, number>();
+    displayProfiles.forEach((p, i) => {
+      map.set(p.name, i + 1);
+    });
+    return map;
+  }, [displayProfiles]);
+
+  const profileLabel = useCallback(
+    (name: string) => {
+      const no = profileNoMap.get(name);
+      const p = displayProfiles.find((item) => item.name === name);
+      const title = p?.displayWorkspace || name;
+      return no ? `#${no} ${title}` : title;
+    },
+    [displayProfiles, profileNoMap],
+  );
+
+  const currentErrorText = useMemo(
+    () => formatCurrentErrorWithProfile(dashboard, dashboard?.currentError),
+    [dashboard],
+  );
+
+  const currentLine = useMemo(() => {
+    if (!dashboard?.current) {
+      return `当前账号: 读取失败`;
+    }
+    const c = dashboard.current;
+    const email = c.email || "-";
+    return `当前账号: ${email} | 工作空间 ${c.displayWorkspace} | 5小时剩余 ${pct(
+      c.fiveHourRemainingPercent,
+    )} | 1周剩余 ${pct(c.oneWeekRemainingPercent)}`;
+  }, [dashboard]);
+
+  const runDashboardCommand = useCallback(
+    async (
+      command: string,
+      args: Record<string, unknown>,
+      successText: string,
+      beforeText?: string,
+    ) => {
+      setBusy(true);
+      if (beforeText) {
+        setStatusText(beforeText);
+      }
+      try {
+        const data = await invoke<DashboardData>(command, args);
+        applyDashboard(data, successText);
+      } catch (err) {
+        setStatusText(`${successText}失败: ${String(err)}`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [applyDashboard],
+  );
+
+  const requireSelectedName = useCallback(() => {
+    if (!selectedProfile) {
+      setStatusText("请先选择一个账号。");
+      return null;
+    }
+    return selectedProfile.name;
+  }, [selectedProfile]);
+
+  const onSaveCurrent = async () => {
+    const profileName = window.prompt("输入账号名称（例如：工作号 / 个人号）：", "");
+    if (!profileName || !profileName.trim()) {
+      setStatusText("取消保存。");
+      return;
+    }
+    await runDashboardCommand(
+      "save_current_profile",
+      { profileName: profileName.trim() },
+      `已保存账号: ${profileName.trim()}`,
+      "正在保存当前账号...",
+    );
+  };
+
+  const onAddByLogin = async () => {
+    await runDashboardCommand(
+      "add_account_by_login",
+      {},
+      "添加账号完成",
+      "正在打开内嵌登录窗口，请在弹出窗口完成登录...",
+    );
+  };
+
+  const onApplySelected = async (name?: string) => {
+    const target = name ?? requireSelectedName();
+    if (!target) {
+      return;
+    }
+    const label = profileLabel(target);
+    await runDashboardCommand(
+      "apply_profile",
+      { name: target },
+      `已切换到账号: ${label}`,
+      `正在切换账号: ${label}...`,
+    );
+  };
+
+  const onSetAlias = async (name?: string) => {
+    const target = name ?? requireSelectedName();
+    if (!target) {
+      return;
+    }
+    const label = profileLabel(target);
+    const currentAlias = dashboard?.profiles.find((p) => p.name === target)?.workspaceAlias || "";
+    const aliasInput = window.prompt("输入工作空间别名（留空清除）：", currentAlias);
+    if (aliasInput === null) {
+      return;
+    }
+    await runDashboardCommand(
+      "set_workspace_alias",
+      { name: target, alias: aliasInput.trim() || null },
+      aliasInput.trim() ? `已更新工作空间别名: ${label}` : `已清除工作空间别名: ${label}`,
+    );
+  };
+
+  const onRefreshSelectedQuota = async (name?: string, refreshToken = false) => {
+    const target = name ?? requireSelectedName();
+    if (!target) {
+      return;
+    }
+    const label = profileLabel(target);
+    await runDashboardCommand(
+      "refresh_profile_quota",
+      { name: target, refreshToken },
+      `已刷新额度: ${label}`,
+      `正在刷新额度: ${label}...`,
+    );
+  };
+
+  const onRefreshAllQuota = async (refreshToken = false) => {
+    await runDashboardCommand(
+      "refresh_all_quota",
+      { refreshToken },
+      "已刷新全部账号额度",
+      "正在刷新全部账号额度...",
+    );
+  };
+
+  const onKeepaliveNow = async () => {
+    await runDashboardCommand("keepalive_all", {}, "手动保活完成", "正在执行全账号保活...");
+  };
+
+  const onDeleteSelected = async (name?: string) => {
+    const target = name ?? requireSelectedName();
+    if (!target) {
+      return;
+    }
+    const label = profileLabel(target);
+    if (!window.confirm(`确定删除账号配置 "${label}" 吗？`)) {
+      return;
+    }
+    await runDashboardCommand("delete_profile", { name: target }, `已删除账号: ${label}`);
+  };
+
+  const onReloadVsCode = async () => {
+    setBusy(true);
+    setStatusText("正在请求 VS Code 重载窗口...");
+    try {
+      const result = await invoke<string>("reload_vscode_window");
+      setStatusText(result);
+    } catch (err) {
+      setStatusText(`重载失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const flushSortPersist = useCallback(async () => {
+    if (sortSavingRef.current) {
+      return;
+    }
+    const names = pendingSortNamesRef.current;
+    if (!names) {
+      return;
+    }
+    pendingSortNamesRef.current = null;
+    sortSavingRef.current = true;
+    setStatusText("正在保存排序...");
+    try {
+      const data = await invoke<DashboardData>("reorder_profiles", { names });
+      if (!pendingSortNamesRef.current) {
+        applyDashboard(data, "排序已保存");
+      } else {
+        setStatusText("排序已保存，正在同步最新顺序...");
+      }
+    } catch (err) {
+      setStatusText(`保存排序失败: ${String(err)}`);
+      void loadDashboard(false, "已回读排序");
+    } finally {
+      sortSavingRef.current = false;
+      if (pendingSortNamesRef.current) {
+        void flushSortPersist();
+      }
+    }
+  }, [applyDashboard, loadDashboard]);
+
+  const queuePersistOrder = useCallback(
+    (names: string[]) => {
+      pendingSortNamesRef.current = [...names];
+      void flushSortPersist();
+    },
+    [flushSortPersist],
+  );
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 8 },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+
+  const profileIds = useMemo(() => displayProfiles.map((p) => p.name), [displayProfiles]);
+
+  const onDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!displayProfiles.length) {
+        return;
+      }
+
+      if (!over) {
+        return;
+      }
+
+      const oldIndex = displayProfiles.findIndex((p) => p.name === String(active.id));
+      const newIndex = displayProfiles.findIndex((p) => p.name === String(over.id));
+      if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) {
+        return;
+      }
+
+      const reordered = arrayMove(displayProfiles, oldIndex, newIndex);
+      setDisplayProfiles(reordered);
+      const names = reordered.map((p) => p.name);
+      queuePersistOrder(names);
+    },
+    [displayProfiles, queuePersistOrder],
+  );
+
+  useEffect(() => {
+    autoEnabledRef.current = autoKeepalive;
+    if (autoTimerRef.current) {
+      window.clearTimeout(autoTimerRef.current);
+      autoTimerRef.current = null;
+    }
+    if (!autoKeepalive) {
+      setStatusText("自动保活已关闭。");
+      return;
+    }
+    const schedule = (delayMs: number) => {
+      autoTimerRef.current = window.setTimeout(async () => {
+        if (!autoEnabledRef.current) {
+          return;
+        }
+        if (autoRunningRef.current) {
+          schedule(30_000);
+          return;
+        }
+        autoRunningRef.current = true;
+        try {
+          const data = await invoke<DashboardData>("keepalive_all");
+          applyDashboard(data, "自动保活完成");
+        } catch (err) {
+          setStatusText(`自动保活失败: ${String(err)}`);
+        } finally {
+          autoRunningRef.current = false;
+          if (autoEnabledRef.current) {
+            schedule(nextAutoDelayMs());
+          }
+        }
+      }, delayMs);
+    };
+    setStatusText("自动保活已开启（每48小时，含错峰）。");
+    schedule(nextAutoDelayMs());
+    return () => {
+      if (autoTimerRef.current) {
+        window.clearTimeout(autoTimerRef.current);
+      }
+    };
+  }, [autoKeepalive, applyDashboard]);
+
+  return (
+    <div className="app-root">
+      <header className="top-bar">
+        <div className="top-left">
+          <span className="spark">✴</span>
+          <div className="brand">Codex Switch</div>
+          <button
+            className="header-icon"
+            disabled={busy}
+            onClick={() => void loadDashboard(true, "已刷新当前状态")}
+            title="刷新状态"
+          >
+            ↻
+          </button>
+        </div>
+        <div className="top-right">
+          <label className="keepalive-switch">
+            <input
+              type="checkbox"
+              checked={autoKeepalive}
+              onChange={(e) => setAutoKeepalive(e.target.checked)}
+              disabled={busy}
+            />
+            <span className="switch-track">
+              <span className="switch-knob" />
+            </span>
+            <span className="switch-text">自动保活(48h)</span>
+          </label>
+          <button className="header-icon" disabled={busy} onClick={() => void onReloadVsCode()} title="刷新 VS Code">
+            ◫
+          </button>
+          <button className="add-btn" disabled={busy} onClick={() => void onAddByLogin()} title="添加账号">
+            +
+          </button>
+        </div>
+      </header>
+
+      <section className="quick-strip">
+        <button className="quick-btn" disabled={busy} onClick={() => void onSaveCurrent()}>
+          保存当前账号
+        </button>
+        <button className="quick-btn" disabled={busy} onClick={() => void onApplySelected()}>
+          应用切换到选中
+        </button>
+        <button className="quick-btn" disabled={busy} onClick={() => void onSetAlias()}>
+          设置空间别名
+        </button>
+        <button className="quick-btn" disabled={busy} onClick={() => void onRefreshSelectedQuota(undefined, false)}>
+          刷新选中额度
+        </button>
+        <button className="quick-btn" disabled={busy} onClick={() => void onRefreshAllQuota(false)}>
+          刷新全部额度
+        </button>
+        <button className="quick-btn" disabled={busy} onClick={() => void onKeepaliveNow()}>
+          立即保活
+        </button>
+        <button className="quick-btn danger" disabled={busy} onClick={() => void onDeleteSelected()}>
+          删除选中
+        </button>
+      </section>
+
+      <section className="summary">{currentLine}</section>
+      {currentErrorText ? <div className="error-banner">当前账号读取失败: {currentErrorText}</div> : null}
+
+      <main className="cards-wrap">
+        {displayProfiles.length ? (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={(event) => void onDragEnd(event)}
+          >
+            <SortableContext items={profileIds} strategy={verticalListSortingStrategy}>
+              <div className="cards-list">
+                {displayProfiles.map((p, idx) => (
+                  <SortableProfileCard
+                    key={p.name}
+                    profile={p}
+                    index={idx}
+                    selected={selected === p.name}
+                    busy={busy}
+                    onSelect={setSelected}
+                    onRefreshQuota={(name) => void onRefreshSelectedQuota(name, false)}
+                    onApply={(name) => void onApplySelected(name)}
+                    onSetAlias={(name) => void onSetAlias(name)}
+                    onDelete={(name) => void onDeleteSelected(name)}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
+        ) : (
+          <div className="empty">暂无账号。点击右上角 + 添加账号（内嵌登录）。</div>
+        )}
+      </main>
+
+      <footer className="status-bar">{busy ? `处理中... ${statusText}` : statusText}</footer>
+    </div>
+  );
+}
+
+export default App;
+
