@@ -1775,10 +1775,7 @@ function App() {
     try {
       // High-frequency UI polling only reads local dashboard state; backend rate-limit reads are cached.
       const data = await invoke<DashboardData>("load_dashboard", { syncCurrent: false });
-      const nextSignature = buildDashboardSignature(data);
-      if (nextSignature !== dashboardSignatureRef.current) {
-        applyDashboard(data);
-      }
+      applyDashboard(data);
       liveStatusErrorStreakRef.current = 0;
       if (data.currentError) {
         const nowMs = Date.now();
