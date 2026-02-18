@@ -1947,17 +1947,21 @@ function App() {
 
   const currentLine = useMemo(() => {
     const modeLabel = activeAppMode === "gpt" ? "GPT" : "OpenCode";
+    const current = dashboard?.current;
     if (initialLoading) {
       return `当前${modeLabel}账号: 账号加载中...`;
     }
-    if (!modeActiveProfile) {
+    if (!modeActiveProfile && !current) {
       return `当前${modeLabel}账号: 未选择`;
     }
-    const email = modeActiveProfile.email || "-";
-    return `当前${modeLabel}账号: ${email} | 工作空间 ${modeActiveProfile.displayWorkspace} | 5 小时剩余 ${pct(
-      modeActiveProfile.fiveHourRemainingPercent,
-    )} | 1 周剩余 ${pct(modeActiveProfile.oneWeekRemainingPercent)}`;
-  }, [activeAppMode, initialLoading, modeActiveProfile]);
+    const email = current?.email || modeActiveProfile?.email || "-";
+    const workspace = current?.displayWorkspace || modeActiveProfile?.displayWorkspace || "-";
+    const fiveHourRemaining = current?.fiveHourRemainingPercent ?? modeActiveProfile?.fiveHourRemainingPercent;
+    const oneWeekRemaining = current?.oneWeekRemainingPercent ?? modeActiveProfile?.oneWeekRemainingPercent;
+    return `当前${modeLabel}账号: ${email} | 工作空间 ${workspace} | 5 小时剩余 ${pct(
+      fiveHourRemaining,
+    )} | 1 周剩余 ${pct(oneWeekRemaining)}`;
+  }, [activeAppMode, dashboard?.current, initialLoading, modeActiveProfile]);
 
   const hookListenerBadge = useMemo(() => {
     if (vscodeStatus === null || hookInstalled === null) {
