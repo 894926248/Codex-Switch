@@ -559,6 +559,12 @@ struct CcSwitchSkillTargetFlags {
     opencode_enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CcSwitchMcpTargetFlags {
+    codex_enabled: bool,
+    opencode_enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupManifest {
@@ -1321,6 +1327,17 @@ fn ccswitch_db_has_skills_table(conn: &Connection) -> CmdResult<bool> {
     Ok(exists > 0)
 }
 
+fn ccswitch_db_has_mcp_servers_table(conn: &Connection) -> CmdResult<bool> {
+    let exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mcp_servers'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("读取 CC Switch mcp_servers 表失败: {e}"))?;
+    Ok(exists > 0)
+}
+
 fn ccswitch_db_has_skill_repos_table(conn: &Connection) -> CmdResult<bool> {
     let exists = conn
         .query_row(
@@ -1520,6 +1537,128 @@ fn ccswitch_load_skill_target_flags_map() -> CmdResult<HashMap<String, CcSwitchS
         });
     }
     Ok(out)
+}
+
+fn ccswitch_load_mcp_target_flags_map() -> CmdResult<HashMap<String, CcSwitchMcpTargetFlags>> {
+    let db_path = ccswitch_db_file()?;
+    if !db_path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    if !ccswitch_db_has_mcp_servers_table(&conn)? {
+        return Ok(HashMap::new());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, enabled_codex, enabled_opencode
+             FROM mcp_servers
+             WHERE id IS NOT NULL AND trim(id) <> ''",
+        )
+        .map_err(|e| format!("读取 CC Switch MCP 开关状态失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })
+        .map_err(|e| format!("遍历 CC Switch MCP 开关状态失败: {e}"))?;
+
+    let mut out: HashMap<String, CcSwitchMcpTargetFlags> = HashMap::new();
+    for item in rows {
+        let (id, codex_enabled, opencode_enabled) =
+            item.map_err(|e| format!("解析 CC Switch MCP 开关状态失败: {e}"))?;
+        let key = id.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        out.insert(
+            key,
+            CcSwitchMcpTargetFlags {
+                codex_enabled,
+                opencode_enabled,
+            },
+        );
+    }
+
+    Ok(out)
+}
+
+fn ccswitch_upsert_mcp_targets_row(
+    server_id: &str,
+    codex_enabled: bool,
+    opencode_enabled: bool,
+    codex_spec: Option<&Value>,
+) -> CmdResult<()> {
+    let id = server_id.trim();
+    if id.is_empty() {
+        return Ok(());
+    }
+
+    let db_path = ccswitch_db_file()?;
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    if !ccswitch_db_has_mcp_servers_table(&conn)? {
+        return Ok(());
+    }
+
+    let server_config = codex_spec
+        .and_then(|spec| serde_json::to_string(spec).ok())
+        .unwrap_or_else(|| "{}".to_string());
+
+    let updated = conn
+        .execute(
+            "UPDATE mcp_servers
+             SET enabled_codex = ?2,
+                 enabled_opencode = ?3
+             WHERE lower(id)=lower(?1)",
+            params![id, codex_enabled, opencode_enabled],
+        )
+        .map_err(|e| format!("更新 CC Switch MCP 开关失败 ({id}): {e}"))?;
+    if updated > 0 {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT INTO mcp_servers
+         (id, name, server_config, description, homepage, docs, tags,
+          enabled_claude, enabled_codex, enabled_gemini, enabled_opencode)
+         VALUES (?1, ?2, ?3, NULL, NULL, NULL, '[]', 0, ?4, 0, ?5)",
+        params![id, id, server_config, codex_enabled, opencode_enabled],
+    )
+    .map_err(|e| format!("写入 CC Switch MCP 记录失败 ({id}): {e}"))?;
+    Ok(())
+}
+
+fn ccswitch_delete_mcp_row(server_id: &str) -> CmdResult<()> {
+    let id = server_id.trim();
+    if id.is_empty() {
+        return Ok(());
+    }
+
+    let db_path = ccswitch_db_file()?;
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    if !ccswitch_db_has_mcp_servers_table(&conn)? {
+        return Ok(());
+    }
+
+    conn.execute("DELETE FROM mcp_servers WHERE lower(id)=lower(?1)", params![id])
+        .map_err(|e| format!("删除 CC Switch MCP 记录失败 ({id}): {e}"))?;
+    Ok(())
 }
 
 fn ccswitch_load_repo_cache_meta(
@@ -3565,11 +3704,16 @@ fn load_mcp_manage_internal() -> CmdResult<McpManageView> {
     let codex_map = read_codex_mcp_servers()?;
     let opencode_map = read_opencode_mcp_servers()?;
     let merged = merge_mcp_maps(&codex_map, &opencode_map);
+    let target_flags = ccswitch_load_mcp_target_flags_map()?;
     let mut servers: Vec<McpServerView> = Vec::new();
 
     for entry in merged {
-        let codex_enabled = entry.codex_spec.is_some();
-        let opencode_enabled = entry.opencode_spec.is_some();
+        let mut codex_enabled = entry.codex_spec.is_some();
+        let mut opencode_enabled = entry.opencode_spec.is_some();
+        if let Some(flags) = target_flags.get(&entry.id.to_lowercase()) {
+            codex_enabled = flags.codex_enabled;
+            opencode_enabled = flags.opencode_enabled;
+        }
         let codex_available = codex_enabled || opencode_enabled;
         let opencode_available = codex_enabled || opencode_enabled;
         let source = mcp_source_label(codex_enabled, opencode_enabled);
@@ -3577,7 +3721,7 @@ fn load_mcp_manage_internal() -> CmdResult<McpManageView> {
             .codex_spec
             .clone()
             .or_else(|| entry.opencode_spec.as_ref().map(convert_opencode_spec_to_codex));
-        let (kind, description, endpoint_url, doc_url) = if let Some(spec) = normalized_spec {
+        let (kind, description, endpoint_url, doc_url) = if let Some(ref spec) = normalized_spec {
             let (kind, description) = mcp_describe_codex_spec(&spec);
             let endpoint_url = mcp_extract_endpoint_url(&spec, &kind);
             let doc_url = mcp_extract_doc_url(&spec, endpoint_url.as_deref());
@@ -3605,6 +3749,13 @@ fn load_mcp_manage_internal() -> CmdResult<McpManageView> {
             codex_available,
             opencode_available,
         });
+
+        ccswitch_upsert_mcp_targets_row(
+            &entry.id,
+            codex_enabled,
+            opencode_enabled,
+            normalized_spec.as_ref(),
+        )?;
     }
 
     servers.sort_by(|a, b| a.id.to_lowercase().cmp(&b.id.to_lowercase()));
@@ -3679,6 +3830,16 @@ fn set_mcp_targets_internal(
 
     write_codex_mcp_servers(&codex_map)?;
     write_opencode_mcp_servers(&opencode_map)?;
+
+    let sync_spec = mcp_find_key_case_insensitive(&codex_map, id)
+        .and_then(|key| codex_map.get(&key).cloned())
+        .or_else(|| {
+            mcp_find_key_case_insensitive(&opencode_map, id)
+                .and_then(|key| opencode_map.get(&key))
+                .map(convert_opencode_spec_to_codex)
+        });
+    ccswitch_upsert_mcp_targets_row(id, codex_enabled, opencode_enabled, sync_spec.as_ref())?;
+
     load_mcp_manage_internal()
 }
 
@@ -3716,6 +3877,7 @@ fn add_mcp_server_internal(
 
     write_codex_mcp_servers(&codex_map)?;
     write_opencode_mcp_servers(&opencode_map)?;
+    ccswitch_upsert_mcp_targets_row(id, codex_enabled, opencode_enabled, Some(&codex_spec))?;
     load_mcp_manage_internal()
 }
 
@@ -3737,6 +3899,7 @@ fn remove_mcp_server_internal(server_id: &str) -> CmdResult<McpManageView> {
 
     write_codex_mcp_servers(&codex_map)?;
     write_opencode_mcp_servers(&opencode_map)?;
+    ccswitch_delete_mcp_row(id)?;
     load_mcp_manage_internal()
 }
 

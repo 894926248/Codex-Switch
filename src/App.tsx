@@ -974,13 +974,24 @@ function App() {
       const data = await invoke<McpManageView>("load_mcp_manage");
       setMcpManage(recomputeMcpManage(data));
       setMcpManageError(null);
+      return true;
     } catch (err) {
       setMcpManageError(`读取 MCP 失败: ${String(err)}`);
+      return false;
     } finally {
       setMcpManageLoading(false);
       setMcpManageRefreshing(false);
     }
   }, []);
+
+  const onRefreshMcpManage = useCallback(async () => {
+    if (mcpManageLoading || mcpManageRefreshing) {
+      return;
+    }
+    setStatusText("正在刷新 MCP...");
+    const ok = await loadMcpManage(false);
+    setStatusText(ok ? "已刷新 MCP" : "刷新 MCP 失败");
+  }, [mcpManageLoading, mcpManageRefreshing, loadMcpManage]);
 
   const onImportExistingMcp = useCallback(async () => {
     setMcpManageRefreshing(true);
@@ -3616,6 +3627,17 @@ function App() {
               <h1 className="skills-inline-title">MCP 服务器管理</h1>
             </div>
             <div className="skills-page-actions">
+              <button
+                type="button"
+                className="skills-head-action"
+                disabled={mcpManageLoading || mcpManageRefreshing}
+                onClick={() => void onRefreshMcpManage()}
+                title={mcpManageRefreshing ? "MCP 刷新中..." : "刷新 MCP"}
+                aria-label={mcpManageRefreshing ? "MCP 刷新中" : "刷新 MCP"}
+              >
+                <RefreshCw className={`skills-head-action-icon ${mcpManageRefreshing ? "icon-spin" : ""}`} />
+                {mcpManageRefreshing ? "刷新中..." : "刷新"}
+              </button>
               <button
                 type="button"
                 className="skills-head-action"
