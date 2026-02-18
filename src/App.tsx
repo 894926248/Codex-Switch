@@ -327,15 +327,20 @@ function formatCurrentErrorWithProfile(data: Pick<DashboardData, "activeProfile"
   if (!raw) {
     return null;
   }
+  const compacted = raw
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const normalized = compacted.length > 260 ? `${compacted.slice(0, 260)}...` : compacted;
   if (!data?.activeProfile) {
-    return raw;
+    return normalized;
   }
   const idx = data.profiles.findIndex((p) => p.name === data.activeProfile);
   if (idx < 0) {
-    return raw;
+    return normalized;
   }
   const profile = data.profiles[idx];
-  return `账号 #${idx + 1} (${profile.displayWorkspace}): ${raw}`;
+  return `账号 #${idx + 1} (${profile.displayWorkspace}): ${normalized}`;
 }
 
 const STARTUP_KEEPALIVE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
@@ -358,6 +363,7 @@ const LIVE_STATUS_BURST_THRESHOLD = 6;
 const LIVE_STATUS_BURST_COOLDOWN_MS = 900;
 const STARTUP_LOAD_TIMEOUT_MS = 8000;
 const STARTUP_BACKGROUND_SYNC_DELAY_MS = 120;
+const CURRENT_ERROR_BANNER_DELAY_MS = 1200;
 const DASHBOARD_WAIT_STEP_MS = 250;
 const DASHBOARD_WAIT_MAX_STEPS = 40;
 const AUTO_SEAMLESS_STORAGE_KEY = "codex-switch.autoSeamlessSwitch";
@@ -1100,6 +1106,7 @@ function App() {
   const [mcpFormCodexEnabled, setMcpFormCodexEnabled] = useState(true);
   const [mcpFormOpencodeEnabled, setMcpFormOpencodeEnabled] = useState(true);
   const [mcpFormError, setMcpFormError] = useState<string | null>(null);
+  const [displayCurrentErrorText, setDisplayCurrentErrorText] = useState<string | null>(null);
 
   const autoTimerRef = useRef<number | null>(null);
   const autoRunningRef = useRef(false);
@@ -1125,6 +1132,8 @@ function App() {
   const liveStatusNextFetchAtRef = useRef(0);
   const liveStatusErrorStreakRef = useRef(0);
   const liveStatusErrorTimesRef = useRef<number[]>([]);
+  const currentErrorCandidateRef = useRef<string | null>(null);
+  const currentErrorCandidateSinceRef = useRef(0);
   const hookListenerVsCodeLastPollAtRef = useRef(0);
   const activeAppModeRef = useRef<AppMode>(activeAppMode);
   const activeProfileByModeRef = useRef<ActiveProfileByMode>(activeProfileByMode);
@@ -2283,7 +2292,7 @@ function App() {
     [displayProfiles, filteredProfiles, profileNoMap],
   );
 
-  const currentErrorText = useMemo(() => {
+  const rawCurrentErrorText = useMemo(() => {
     if (!dashboard?.currentError) {
       return null;
     }
@@ -2292,6 +2301,34 @@ function App() {
     }
     return formatCurrentErrorWithProfile(dashboard, dashboard.currentError);
   }, [activeAppMode, dashboard]);
+
+  useEffect(() => {
+    if (!rawCurrentErrorText) {
+      currentErrorCandidateRef.current = null;
+      currentErrorCandidateSinceRef.current = 0;
+      setDisplayCurrentErrorText(null);
+      return;
+    }
+
+    const now = Date.now();
+    if (currentErrorCandidateRef.current !== rawCurrentErrorText) {
+      currentErrorCandidateRef.current = rawCurrentErrorText;
+      currentErrorCandidateSinceRef.current = now;
+    }
+    const elapsed = now - currentErrorCandidateSinceRef.current;
+    if (elapsed >= CURRENT_ERROR_BANNER_DELAY_MS) {
+      setDisplayCurrentErrorText(rawCurrentErrorText);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      if (currentErrorCandidateRef.current === rawCurrentErrorText) {
+        setDisplayCurrentErrorText(rawCurrentErrorText);
+      }
+    }, CURRENT_ERROR_BANNER_DELAY_MS - elapsed);
+    return () => window.clearTimeout(timer);
+  }, [rawCurrentErrorText]);
+
   const uiBusy = busy && !initialLoading;
   const settingsTargetName = settingsEditorTarget === "kiro" ? "Kiro Codex" : "VSCode Codex";
   const settingsTargetShortName = settingsEditorTarget === "kiro" ? "Kiro" : "VSCode";
@@ -2466,16 +2503,32 @@ function App() {
       return;
     }
     const label = profileLabel(target);
-    const ok = await runDashboardCommand(
-      "apply_profile",
-      { name: target, mode: activeAppMode },
-      `已切换到账号: ${label}`,
-      `正在切换账号: ${label}...`,
-    );
-    if (ok) {
-      setActiveProfileByMode((prev) =>
-        prev[activeAppMode] === target ? prev : { ...prev, [activeAppMode]: target },
+    setBlockingMessage(`正在切换账号: ${label}...`);
+    try {
+      const ok = await runDashboardCommand(
+        "apply_profile",
+        { name: target, mode: activeAppMode },
+        `已切换到账号: ${label}`,
+        `正在切换账号: ${label}...`,
       );
+      if (ok) {
+        setActiveProfileByMode((prev) =>
+          prev[activeAppMode] === target ? prev : { ...prev, [activeAppMode]: target },
+        );
+        setBlockingMessage(`正在校准额度: ${label}...`);
+        try {
+          const calibrated = await invoke<DashboardData>("refresh_profile_quota", {
+            name: target,
+            refreshToken: false,
+            mode: activeAppMode,
+          });
+          applyDashboard(calibrated, `已切换到账号: ${label}`);
+        } catch (err) {
+          setStatusText(`已切换到账号: ${label}（额度校准失败: ${String(err)}）`);
+        }
+      }
+    } finally {
+      setBlockingMessage(null);
     }
   };
 
@@ -3951,8 +4004,8 @@ function App() {
               <span>配额查询中...</span>
             </section>
           ) : null}
-          {!initialLoading && currentErrorText ? (
-            <div className="error-banner">当前账号读取失败: {currentErrorText}</div>
+          {!initialLoading && displayCurrentErrorText ? (
+            <div className="error-banner">当前账号读取失败: {displayCurrentErrorText}</div>
           ) : null}
 
           <main className="cards-wrap">
