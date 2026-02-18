@@ -494,7 +494,9 @@ struct McpServerView {
     endpoint_url: Option<String>,
     source: String,
     kind: String,
+    claude_enabled: bool,
     codex_enabled: bool,
+    gemini_enabled: bool,
     opencode_enabled: bool,
     codex_available: bool,
     opencode_available: bool,
@@ -504,7 +506,9 @@ struct McpServerView {
 #[serde(rename_all = "camelCase")]
 struct McpManageView {
     total: usize,
+    claude_enabled_count: usize,
     codex_enabled_count: usize,
+    gemini_enabled_count: usize,
     opencode_enabled_count: usize,
     servers: Vec<McpServerView>,
 }
@@ -557,6 +561,12 @@ struct CcSwitchSkillDbRow {
 struct CcSwitchSkillTargetFlags {
     codex_enabled: bool,
     opencode_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CcSwitchMcpAppFlags {
+    claude_enabled: bool,
+    gemini_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1533,9 +1543,57 @@ fn ccswitch_load_skill_target_flags_map() -> CmdResult<HashMap<String, CcSwitchS
     Ok(out)
 }
 
+fn ccswitch_load_mcp_app_flags_map() -> CmdResult<HashMap<String, CcSwitchMcpAppFlags>> {
+    let db_path = ccswitch_db_file()?;
+    if !db_path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    if !ccswitch_db_has_mcp_servers_table(&conn)? {
+        return Ok(HashMap::new());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, enabled_claude, enabled_gemini
+             FROM mcp_servers
+             WHERE id IS NOT NULL AND trim(id) <> ''",
+        )
+        .map_err(|e| format!("读取 CC Switch MCP 应用开关状态失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })
+        .map_err(|e| format!("遍历 CC Switch MCP 应用开关状态失败: {e}"))?;
+
+    let mut out: HashMap<String, CcSwitchMcpAppFlags> = HashMap::new();
+    for item in rows {
+        let (id, claude_enabled, gemini_enabled) =
+            item.map_err(|e| format!("解析 CC Switch MCP 应用开关状态失败: {e}"))?;
+        let key = id.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        out.entry(key).or_insert(CcSwitchMcpAppFlags {
+            claude_enabled,
+            gemini_enabled,
+        });
+    }
+    Ok(out)
+}
+
 fn ccswitch_upsert_mcp_targets_row(
     server_id: &str,
+    claude_enabled: Option<bool>,
     codex_enabled: bool,
+    gemini_enabled: Option<bool>,
     opencode_enabled: bool,
     codex_spec: Option<&Value>,
 ) -> CmdResult<()> {
@@ -1562,10 +1620,18 @@ fn ccswitch_upsert_mcp_targets_row(
     let updated = conn
         .execute(
             "UPDATE mcp_servers
-             SET enabled_codex = ?2,
-                 enabled_opencode = ?3
+             SET enabled_claude = COALESCE(?2, enabled_claude),
+                 enabled_codex = ?3,
+                 enabled_gemini = COALESCE(?4, enabled_gemini),
+                 enabled_opencode = ?5
              WHERE lower(id)=lower(?1)",
-            params![id, codex_enabled, opencode_enabled],
+            params![
+                id,
+                claude_enabled,
+                codex_enabled,
+                gemini_enabled,
+                opencode_enabled
+            ],
         )
         .map_err(|e| format!("更新 CC Switch MCP 开关失败 ({id}): {e}"))?;
     if updated > 0 {
@@ -1576,8 +1642,16 @@ fn ccswitch_upsert_mcp_targets_row(
         "INSERT INTO mcp_servers
          (id, name, server_config, description, homepage, docs, tags,
           enabled_claude, enabled_codex, enabled_gemini, enabled_opencode)
-         VALUES (?1, ?2, ?3, NULL, NULL, NULL, '[]', 0, ?4, 0, ?5)",
-        params![id, id, server_config, codex_enabled, opencode_enabled],
+         VALUES (?1, ?2, ?3, NULL, NULL, NULL, '[]', ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            id,
+            server_config,
+            claude_enabled.unwrap_or(false),
+            codex_enabled,
+            gemini_enabled.unwrap_or(false),
+            opencode_enabled
+        ],
     )
     .map_err(|e| format!("写入 CC Switch MCP 记录失败 ({id}): {e}"))?;
     Ok(())
@@ -3647,12 +3721,17 @@ fn merge_mcp_maps(
 fn load_mcp_manage_internal() -> CmdResult<McpManageView> {
     let codex_map = read_codex_mcp_servers()?;
     let opencode_map = read_opencode_mcp_servers()?;
+    let app_flags_map = ccswitch_load_mcp_app_flags_map()?;
     let merged = merge_mcp_maps(&codex_map, &opencode_map);
     let mut servers: Vec<McpServerView> = Vec::new();
 
     for entry in merged {
         let codex_enabled = entry.codex_spec.is_some();
         let opencode_enabled = entry.opencode_spec.is_some();
+        let (claude_enabled, gemini_enabled) = app_flags_map
+            .get(&entry.id.to_lowercase())
+            .map(|flags| (flags.claude_enabled, flags.gemini_enabled))
+            .unwrap_or((false, false));
         let codex_available = codex_enabled || opencode_enabled;
         let opencode_available = codex_enabled || opencode_enabled;
         let source = mcp_source_label(codex_enabled, opencode_enabled);
@@ -3683,7 +3762,9 @@ fn load_mcp_manage_internal() -> CmdResult<McpManageView> {
             endpoint_url,
             source,
             kind,
+            claude_enabled,
             codex_enabled,
+            gemini_enabled,
             opencode_enabled,
             codex_available,
             opencode_available,
@@ -3691,18 +3772,24 @@ fn load_mcp_manage_internal() -> CmdResult<McpManageView> {
 
         ccswitch_upsert_mcp_targets_row(
             &entry.id,
+            None,
             codex_enabled,
+            None,
             opencode_enabled,
             normalized_spec.as_ref(),
         )?;
     }
 
     servers.sort_by(|a, b| a.id.to_lowercase().cmp(&b.id.to_lowercase()));
+    let claude_enabled_count = servers.iter().filter(|s| s.claude_enabled).count();
     let codex_enabled_count = servers.iter().filter(|s| s.codex_enabled).count();
+    let gemini_enabled_count = servers.iter().filter(|s| s.gemini_enabled).count();
     let opencode_enabled_count = servers.iter().filter(|s| s.opencode_enabled).count();
     Ok(McpManageView {
         total: servers.len(),
+        claude_enabled_count,
         codex_enabled_count,
+        gemini_enabled_count,
         opencode_enabled_count,
         servers,
     })
@@ -3710,7 +3797,9 @@ fn load_mcp_manage_internal() -> CmdResult<McpManageView> {
 
 fn set_mcp_targets_internal(
     server_id: &str,
+    claude_enabled: Option<bool>,
     codex_enabled: bool,
+    gemini_enabled: Option<bool>,
     opencode_enabled: bool,
 ) -> CmdResult<McpManageView> {
     let id = server_id.trim();
@@ -3777,7 +3866,14 @@ fn set_mcp_targets_internal(
                 .and_then(|key| opencode_map.get(&key))
                 .map(convert_opencode_spec_to_codex)
         });
-    ccswitch_upsert_mcp_targets_row(id, codex_enabled, opencode_enabled, sync_spec.as_ref())?;
+    ccswitch_upsert_mcp_targets_row(
+        id,
+        claude_enabled,
+        codex_enabled,
+        gemini_enabled,
+        opencode_enabled,
+        sync_spec.as_ref(),
+    )?;
 
     load_mcp_manage_internal()
 }
@@ -3785,7 +3881,9 @@ fn set_mcp_targets_internal(
 fn add_mcp_server_internal(
     server_id: &str,
     spec: &Value,
+    claude_enabled: bool,
     codex_enabled: bool,
+    gemini_enabled: bool,
     opencode_enabled: bool,
 ) -> CmdResult<McpManageView> {
     let id = server_id.trim();
@@ -3816,7 +3914,14 @@ fn add_mcp_server_internal(
 
     write_codex_mcp_servers(&codex_map)?;
     write_opencode_mcp_servers(&opencode_map)?;
-    ccswitch_upsert_mcp_targets_row(id, codex_enabled, opencode_enabled, Some(&codex_spec))?;
+    ccswitch_upsert_mcp_targets_row(
+        id,
+        Some(claude_enabled),
+        codex_enabled,
+        Some(gemini_enabled),
+        opencode_enabled,
+        Some(&codex_spec),
+    )?;
     load_mcp_manage_internal()
 }
 
@@ -11019,18 +11124,26 @@ fn import_existing_mcp() -> CmdResult<McpManageView> {
 }
 
 #[tauri::command]
-fn set_mcp_targets(server_id: String, codex: bool, opencode: bool) -> CmdResult<McpManageView> {
-    set_mcp_targets_internal(&server_id, codex, opencode)
+fn set_mcp_targets(
+    server_id: String,
+    claude: Option<bool>,
+    codex: bool,
+    gemini: Option<bool>,
+    opencode: bool,
+) -> CmdResult<McpManageView> {
+    set_mcp_targets_internal(&server_id, claude, codex, gemini, opencode)
 }
 
 #[tauri::command]
 fn add_mcp_server(
     server_id: String,
     spec: Value,
+    claude: bool,
     codex: bool,
+    gemini: bool,
     opencode: bool,
 ) -> CmdResult<McpManageView> {
-    add_mcp_server_internal(&server_id, &spec, codex, opencode)
+    add_mcp_server_internal(&server_id, &spec, claude, codex, gemini, opencode)
 }
 
 #[tauri::command]

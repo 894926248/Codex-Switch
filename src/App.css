@@ -1768,6 +1768,13 @@ button {
   object-fit: contain;
 }
 
+.skill-target-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #8ea2af;
+}
+
 .skill-target-track {
   width: 44px;
   height: 26px;

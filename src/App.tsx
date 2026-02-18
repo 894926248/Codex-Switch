@@ -184,7 +184,9 @@ interface McpServerView {
   endpointUrl?: string | null;
   source: string;
   kind: string;
+  claudeEnabled: boolean;
   codexEnabled: boolean;
+  geminiEnabled: boolean;
   opencodeEnabled: boolean;
   codexAvailable: boolean;
   opencodeAvailable: boolean;
@@ -192,7 +194,9 @@ interface McpServerView {
 
 interface McpManageView {
   total: number;
+  claudeEnabledCount: number;
   codexEnabledCount: number;
+  geminiEnabledCount: number;
   opencodeEnabledCount: number;
   servers: McpServerView[];
 }
@@ -211,6 +215,7 @@ type PostSwitchStrategy = "hook" | "restart_extension_host";
 type AppMode = "gpt" | "opencode";
 type ActiveProfileByMode = Record<AppMode, string | null>;
 type SkillTarget = "codex" | "opencode";
+type McpTarget = "claude" | "codex" | "gemini" | "opencode";
 type ToolView = "dashboard" | "skills" | "skillsDiscovery" | "skillsRepos" | "prompts" | "mcp" | "mcpAdd";
 
 const MCP_CONFIG_PLACEHOLDER = '{\n  "type": "stdio",\n  "command": "uvx",\n  "args": ["mcp-server-fetch"]\n}';
@@ -829,7 +834,7 @@ function McpIcon({ size = 16, className = "" }: { size?: number; className?: str
 
 interface SkillTargetSwitchProps {
   label: string;
-  icon: string;
+  icon?: string;
   checked: boolean;
   busy: boolean;
   onClick: () => void;
@@ -846,7 +851,7 @@ function SkillTargetSwitch({ label, icon, checked, busy, onClick }: SkillTargetS
       disabled={busy}
     >
       <span className="skill-target-label">
-        <img src={icon} alt="" aria-hidden className="skill-target-icon" />
+        {icon ? <img src={icon} alt="" aria-hidden className="skill-target-icon" /> : <span aria-hidden className="skill-target-dot" />}
         <span>{label}</span>
       </span>
       <span className={`skill-target-track ${checked ? "on" : "off"}`}>
@@ -868,12 +873,16 @@ function recomputeSkillsCatalog(catalog: SkillsCatalogView): SkillsCatalogView {
 }
 
 function recomputeMcpManage(view: McpManageView): McpManageView {
+  const claudeEnabledCount = view.servers.filter((item) => item.claudeEnabled).length;
   const codexEnabledCount = view.servers.filter((item) => item.codexEnabled).length;
+  const geminiEnabledCount = view.servers.filter((item) => item.geminiEnabled).length;
   const opencodeEnabledCount = view.servers.filter((item) => item.opencodeEnabled).length;
   return {
     ...view,
     total: view.servers.length,
+    claudeEnabledCount,
     codexEnabledCount,
+    geminiEnabledCount,
     opencodeEnabledCount,
   };
 }
@@ -946,7 +955,7 @@ function App() {
   const [mcpFormClaudeEnabled, setMcpFormClaudeEnabled] = useState(true);
   const [mcpFormGeminiEnabled, setMcpFormGeminiEnabled] = useState(true);
   const [mcpFormCodexEnabled, setMcpFormCodexEnabled] = useState(true);
-  const [mcpFormOpencodeEnabled, setMcpFormOpencodeEnabled] = useState(false);
+  const [mcpFormOpencodeEnabled, setMcpFormOpencodeEnabled] = useState(true);
   const [mcpFormError, setMcpFormError] = useState<string | null>(null);
 
   const autoTimerRef = useRef<number | null>(null);
@@ -1100,7 +1109,7 @@ function App() {
     setMcpFormClaudeEnabled(true);
     setMcpFormGeminiEnabled(true);
     setMcpFormCodexEnabled(true);
-    setMcpFormOpencodeEnabled(false);
+    setMcpFormOpencodeEnabled(true);
     setMcpFormError(null);
   }, []);
 
@@ -1194,7 +1203,9 @@ function App() {
       const data = await invoke<McpManageView>("add_mcp_server", {
         serverId: id,
         spec,
+        claude: mcpFormClaudeEnabled,
         codex: mcpFormCodexEnabled,
+        gemini: mcpFormGeminiEnabled,
         opencode: mcpFormOpencodeEnabled,
       });
       setMcpManage(recomputeMcpManage(data));
@@ -1214,7 +1225,9 @@ function App() {
   }, [
     mcpFormId,
     mcpFormConfig,
+    mcpFormClaudeEnabled,
     mcpFormCodexEnabled,
+    mcpFormGeminiEnabled,
     mcpFormOpencodeEnabled,
     resetMcpAddForm,
   ]);
@@ -1239,8 +1252,10 @@ function App() {
   }, [mcpFormConfig]);
 
   const onToggleMcpTarget = useCallback(
-    async (server: McpServerView, target: SkillTarget) => {
+    async (server: McpServerView, target: McpTarget) => {
+      const nextClaude = target === "claude" ? !server.claudeEnabled : server.claudeEnabled;
       const nextCodex = target === "codex" ? !server.codexEnabled : server.codexEnabled;
+      const nextGemini = target === "gemini" ? !server.geminiEnabled : server.geminiEnabled;
       const nextOpenCode = target === "opencode" ? !server.opencodeEnabled : server.opencodeEnabled;
       setMcpBusyIds((prev) => ({ ...prev, [server.id]: true }));
       setMcpManage((prev) => {
@@ -1253,7 +1268,9 @@ function App() {
             item.id === server.id
               ? {
                   ...item,
+                  claudeEnabled: nextClaude,
                   codexEnabled: nextCodex,
+                  geminiEnabled: nextGemini,
                   opencodeEnabled: nextOpenCode,
                 }
               : item,
@@ -1264,7 +1281,9 @@ function App() {
       try {
         const data = await invoke<McpManageView>("set_mcp_targets", {
           serverId: server.id,
+          claude: nextClaude,
           codex: nextCodex,
+          gemini: nextGemini,
           opencode: nextOpenCode,
         });
         setMcpManage(recomputeMcpManage(data));
@@ -1608,9 +1627,9 @@ function App() {
 
   const mcpSummaryText = useMemo(() => {
     if (!mcpManage) {
-      return "已配置 0 个 MCP 服务器 · Codex: 0 · OpenCode: 0";
+      return "已配置 0 个 MCP 服务器 · Claude: 0 · Codex: 0 · Gemini: 0 · OpenCode: 0";
     }
-    return `已配置 ${mcpManage.total} 个 MCP 服务器 · Codex: ${mcpManage.codexEnabledCount} · OpenCode: ${mcpManage.opencodeEnabledCount}`;
+    return `已配置 ${mcpManage.total} 个 MCP 服务器 · Claude: ${mcpManage.claudeEnabledCount} · Codex: ${mcpManage.codexEnabledCount} · Gemini: ${mcpManage.geminiEnabledCount} · OpenCode: ${mcpManage.opencodeEnabledCount}`;
   }, [mcpManage]);
 
   const mcpSyncingEmpty =
@@ -3829,11 +3848,23 @@ function App() {
                     </div>
                     <div className="skills-inline-targets">
                       <SkillTargetSwitch
+                        label="Claude"
+                        checked={server.claudeEnabled}
+                        busy={busy}
+                        onClick={() => void onToggleMcpTarget(server, "claude")}
+                      />
+                      <SkillTargetSwitch
                         label="Codex"
                         icon={openaiLogo}
                         checked={server.codexEnabled}
                         busy={busy || !server.codexAvailable}
                         onClick={() => void onToggleMcpTarget(server, "codex")}
+                      />
+                      <SkillTargetSwitch
+                        label="Gemini"
+                        checked={server.geminiEnabled}
+                        busy={busy}
+                        onClick={() => void onToggleMcpTarget(server, "gemini")}
                       />
                       <SkillTargetSwitch
                         label="OpenCode"
