@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Kiro">
+  <defs>
+    <linearGradient id="kiro-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#39a8ff" />
+      <stop offset="100%" stop-color="#2f6dff" />
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#kiro-grad)" />
+  <path d="M21 16h8v14.5L42.2 16h10.3L37.2 31.8 53 48H42L29 34.1V48h-8z" fill="#fff" />
+</svg>

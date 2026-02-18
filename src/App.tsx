@@ -24,7 +24,25 @@ import { ArrowLeft, Book, ChevronDown, ChevronUp, Download, ExternalLink, FileAr
 import "./App.css";
 import openaiLogo from "./assets/openai.svg";
 import opencodeLogo from "./assets/opencode.svg";
+import kiroLogo from "./assets/kiro.svg";
 import vscodeLogo from "./assets/vscode.svg";
+
+const SUPPORTED_EDITORS = [
+  {
+    id: "vscode",
+    name: "VSCode",
+    icon: vscodeLogo,
+    desc: "支持账号切换、扩展宿主重启与 Hook 提速。",
+  },
+  {
+    id: "kiro",
+    name: "Kiro",
+    icon: kiroLogo,
+    desc: "支持账号切换、状态同步与命令重载触发。",
+  },
+] as const;
+
+type SettingsEditorTarget = (typeof SUPPORTED_EDITORS)[number]["id"];
 
 type MaybeNum = number | null | undefined;
 
@@ -71,6 +89,10 @@ interface DashboardData {
   currentErrorMode?: "gpt" | "opencode" | null;
   lastKeepaliveAt?: number | null;
   profiles: ProfileView[];
+}
+
+interface ApplyDashboardOptions {
+  preserveQuotaFromCurrentDashboard?: boolean;
 }
 
 interface AutoSwitchTickResult {
@@ -1027,6 +1049,7 @@ function App() {
   const [postSwitchStrategy, setPostSwitchStrategy] = useState<PostSwitchStrategy>(() =>
     readPostSwitchStrategyStorage("restart_extension_host"),
   );
+  const [settingsEditorTarget, setSettingsEditorTarget] = useState<SettingsEditorTarget>("vscode");
   const [windowCloseAction, setWindowCloseAction] = useState<WindowCloseAction>(() =>
     readWindowCloseActionStorage("ask"),
   );
@@ -1911,7 +1934,47 @@ function App() {
     void loadMcpManage(true);
   }, [activeToolView, loadMcpManage, mcpManage, mcpManageLoading, mcpManageRefreshing]);
 
-  const applyDashboard = useCallback((data: DashboardData, msg?: string) => {
+  const applyDashboard = useCallback((data: DashboardData, msg?: string, options?: ApplyDashboardOptions) => {
+    const preserveQuotaFromCurrentDashboard = options?.preserveQuotaFromCurrentDashboard === true;
+    const previousDashboard = dashboardRef.current;
+    const previousProfileMap = new Map((previousDashboard?.profiles ?? []).map((profile) => [profile.name, profile]));
+    const mergeQuotaFromPreviousProfile = (profile: ProfileView): ProfileView => {
+      if (!preserveQuotaFromCurrentDashboard) {
+        return profile;
+      }
+      const previous = previousProfileMap.get(profile.name);
+      if (!previous) {
+        return profile;
+      }
+      const pick = <T,>(oldValue: T | undefined, nextValue: T): T => (oldValue !== undefined ? oldValue : nextValue);
+      return {
+        ...profile,
+        fiveHourRemainingPercent: pick(previous.fiveHourRemainingPercent, profile.fiveHourRemainingPercent),
+        fiveHourResetsAt: pick(previous.fiveHourResetsAt, profile.fiveHourResetsAt),
+        oneWeekRemainingPercent: pick(previous.oneWeekRemainingPercent, profile.oneWeekRemainingPercent),
+        oneWeekResetsAt: pick(previous.oneWeekResetsAt, profile.oneWeekResetsAt),
+        lastCheckedAt: pick(previous.lastCheckedAt, profile.lastCheckedAt),
+        lastError: pick(previous.lastError, profile.lastError),
+      };
+    };
+    const mergeQuotaFromPreviousCurrent = (current: CurrentStatusView | null | undefined): CurrentStatusView | null | undefined => {
+      if (!preserveQuotaFromCurrentDashboard || !current) {
+        return current;
+      }
+      const previousCurrent = dashboardCurrentByMode(previousDashboard, activeAppModeRef.current);
+      if (!previousCurrent) {
+        return current;
+      }
+      const pick = <T,>(oldValue: T | undefined, nextValue: T): T => (oldValue !== undefined ? oldValue : nextValue);
+      return {
+        ...current,
+        fiveHourRemainingPercent: pick(previousCurrent.fiveHourRemainingPercent, current.fiveHourRemainingPercent),
+        fiveHourResetsAt: pick(previousCurrent.fiveHourResetsAt, current.fiveHourResetsAt),
+        oneWeekRemainingPercent: pick(previousCurrent.oneWeekRemainingPercent, current.oneWeekRemainingPercent),
+        oneWeekResetsAt: pick(previousCurrent.oneWeekResetsAt, current.oneWeekResetsAt),
+      };
+    };
+
     const currentMode = activeAppModeRef.current;
     const modeCurrent = dashboardCurrentByMode(data, currentMode);
     const mergeQuotaFromCurrent = (profile: ProfileView): ProfileView => ({
@@ -1931,7 +1994,21 @@ function App() {
             profile.name === mergeTargetName ? mergeQuotaFromCurrent(profile) : profile,
           )
         : data.profiles;
-    const nextDashboard = mergedProfiles === data.profiles ? data : { ...data, profiles: mergedProfiles };
+    const mergedProfilesWithPreservedQuota = preserveQuotaFromCurrentDashboard
+      ? mergedProfiles.map((profile) => mergeQuotaFromPreviousProfile(profile))
+      : mergedProfiles;
+    const hasProfileMutation = mergedProfilesWithPreservedQuota !== data.profiles;
+    const nextDashboardBase = hasProfileMutation ? { ...data, profiles: mergedProfilesWithPreservedQuota } : data;
+    const nextDashboard =
+      currentMode === "opencode"
+        ? {
+            ...nextDashboardBase,
+            opencodeCurrent: mergeQuotaFromPreviousCurrent(nextDashboardBase.opencodeCurrent),
+          }
+        : {
+            ...nextDashboardBase,
+            current: mergeQuotaFromPreviousCurrent(nextDashboardBase.current),
+          };
     dashboardSignatureRef.current = buildDashboardSignature(nextDashboard);
 
     dashboardRef.current = nextDashboard;
@@ -2029,7 +2106,7 @@ function App() {
       });
       const nextSignature = buildDashboardSignature(data);
       if (nextSignature !== dashboardSignatureRef.current) {
-        applyDashboard(data);
+        applyDashboard(data, undefined, { preserveQuotaFromCurrentDashboard: true });
       }
       liveStatusErrorStreakRef.current = 0;
       if (data.currentError) {
@@ -2121,7 +2198,11 @@ function App() {
     if (preferred && filteredProfiles.some((profile) => profile.name === preferred)) {
       return preferred;
     }
-    if (dashboard?.activeProfile && filteredProfiles.some((profile) => profile.name === dashboard.activeProfile)) {
+    if (
+      activeAppMode !== "opencode" &&
+      dashboard?.activeProfile &&
+      filteredProfiles.some((profile) => profile.name === dashboard.activeProfile)
+    ) {
       return dashboard.activeProfile;
     }
     return filteredProfiles[0]?.name ?? null;
@@ -2152,6 +2233,11 @@ function App() {
         ? findProfileNameForCurrent(dashboard, modeCurrent, activeProfileByMode[activeAppMode])
         : null,
     [activeAppMode, activeProfileByMode, dashboard, modeCurrent],
+  );
+
+  const liveQueryProfileName = useMemo(
+    () => (activeAppMode === "opencode" ? modeActiveProfileName : currentProfileName),
+    [activeAppMode, currentProfileName, modeActiveProfileName],
   );
 
   const liveQuotaMergeTargetName = useMemo(() => {
@@ -2207,6 +2293,8 @@ function App() {
     return formatCurrentErrorWithProfile(dashboard, dashboard.currentError);
   }, [activeAppMode, dashboard]);
   const uiBusy = busy && !initialLoading;
+  const settingsTargetName = settingsEditorTarget === "kiro" ? "Kiro Codex" : "VSCode Codex";
+  const settingsTargetShortName = settingsEditorTarget === "kiro" ? "Kiro" : "VSCode";
 
   const currentLine = useMemo(() => {
     const modeLabel = activeAppMode === "gpt" ? "GPT" : "OpenCode";
@@ -2434,7 +2522,7 @@ function App() {
         { quotaQuerying: true, refreshingProfiles: filteredProfiles.map((profile) => profile.name) },
       );
     },
-    [filteredProfiles, runDashboardCommand],
+    [activeAppMode, filteredProfiles, runDashboardCommand],
   );
 
   const onRefreshStartupQuota = useCallback(async () => {
@@ -2493,9 +2581,9 @@ function App() {
     }
   };
 
-  const refreshVsCodeStatus = useCallback(async (silent = false) => {
+  const refreshVsCodeStatus = useCallback(async (silent = false, editorTarget: SettingsEditorTarget = settingsEditorTarget) => {
     try {
-      const status = await invoke<VsCodeStatusView>("get_vscode_status");
+      const status = await invoke<VsCodeStatusView>("get_vscode_status", { editorTarget });
       setVsCodeStatus((prev) => {
         if (prev && prev.running === status.running && prev.processCount === status.processCount) {
           return prev;
@@ -2512,7 +2600,7 @@ function App() {
       }
       return null;
     }
-  }, []);
+  }, [settingsEditorTarget]);
 
   const refreshOpenCodeMonitorStatus = useCallback(async (silent = false) => {
     try {
@@ -2578,7 +2666,7 @@ function App() {
     setBusy(true);
     setStatusText("正在请求 VS Code 重载窗口...");
     try {
-      const status = await refreshVsCodeStatus(true);
+      const status = await refreshVsCodeStatus(true, "vscode");
       if (!status?.running) {
         setStatusText("未检测到 VS Code 正在运行，请先启动 VS Code。");
         return;
@@ -2593,9 +2681,9 @@ function App() {
   };
 
   const refreshHookStatus = useCallback(
-    async (silent = false) => {
+    async (silent = false, editorTarget: SettingsEditorTarget = settingsEditorTarget) => {
       try {
-        const installed = await invoke<boolean>("is_codex_hook_installed");
+        const installed = await invoke<boolean>("is_codex_hook_installed", { editorTarget });
         setHookInstalled((prev) => (prev === installed ? prev : installed));
         if (!silent && postSwitchStrategy === "hook" && !installed) {
           setStatusText("检测到方案2 Hook 提速版未注入，可在设置中心一键注入。");
@@ -2609,20 +2697,20 @@ function App() {
         return null;
       }
     },
-    [postSwitchStrategy],
+    [postSwitchStrategy, settingsEditorTarget],
   );
 
   const onInstallCodexHook = async () => {
     setBusy(true);
     setStatusText("正在安装/更新方案2 Hook 提速版...");
     try {
-      const status = await refreshVsCodeStatus(true);
+      const status = await refreshVsCodeStatus(true, settingsEditorTarget);
       if (!status?.running) {
-        setStatusText("未检测到 VS Code 正在运行，无法注入 Hook。请先启动 VS Code。");
+        setStatusText(`未检测到 ${settingsTargetName} 正在运行，无法注入 Hook。请先启动 ${settingsTargetShortName}。`);
         return;
       }
-      const result = await invoke<string>("install_codex_hook");
-      await refreshHookStatus(true);
+      const result = await invoke<string>("install_codex_hook", { editorTarget: settingsEditorTarget });
+      await refreshHookStatus(true, settingsEditorTarget);
       const info = await refreshCodexExtensionInfo(true);
       if (info?.currentVersion) {
         setHookVersionSnapshot(info.currentVersion);
@@ -2639,13 +2727,16 @@ function App() {
     async (strategy: PostSwitchStrategy, fromAutoSwitch: boolean) => {
       const effectiveStrategy: PostSwitchStrategy =
         fromAutoSwitch && strategy === "restart_extension_host" ? "hook" : strategy;
-      const result = await invoke<string>("run_post_switch_action", { strategy: effectiveStrategy });
+      const result = await invoke<string>("run_post_switch_action", {
+        strategy: effectiveStrategy,
+        editorTarget: settingsEditorTarget,
+      });
       if (!fromAutoSwitch) {
         setStatusText(result);
       }
       return result;
     },
-    [],
+    [settingsEditorTarget],
   );
 
   const onRunPostSwitchStrategy = async (strategy: PostSwitchStrategy) => {
@@ -2656,13 +2747,13 @@ function App() {
         : "正在执行方案1（重启 Extension Host）...",
     );
     try {
-      const status = await refreshVsCodeStatus(true);
+      const status = await refreshVsCodeStatus(true, settingsEditorTarget);
       if (!status?.running) {
-        setStatusText("未检测到 VS Code 正在运行，请先启动后再执行该策略。");
+        setStatusText(`未检测到 ${settingsTargetName} 正在运行，请先启动后再执行该策略。`);
         return;
       }
       if (strategy === "hook") {
-        const installed = await refreshHookStatus(true);
+        const installed = await refreshHookStatus(true, settingsEditorTarget);
         if (installed === false) {
           setStatusText(
             "方案2 Hook 提速版未注入或版本过旧，请先点击“一键注入并启用方案2提速版”或“安装/更新方案2 Hook 提速版”。",
@@ -2682,18 +2773,21 @@ function App() {
     setBusy(true);
     setStatusText("正在一键注入 Hook 提速版并启用方案2...");
     try {
-      const status = await refreshVsCodeStatus(true);
+      const status = await refreshVsCodeStatus(true, settingsEditorTarget);
       if (!status?.running) {
-        setStatusText("未检测到 VS Code 正在运行。请先启动 VS Code，再执行一键注入。");
+        setStatusText(`未检测到 ${settingsTargetName} 正在运行。请先启动 ${settingsTargetShortName}，再执行一键注入。`);
         return;
       }
-      const installMsg = await invoke<string>("install_codex_hook");
-      await refreshHookStatus(true);
+      const installMsg = await invoke<string>("install_codex_hook", { editorTarget: settingsEditorTarget });
+      await refreshHookStatus(true, settingsEditorTarget);
       const info = await refreshCodexExtensionInfo(true);
       if (info?.currentVersion) {
         setHookVersionSnapshot(info.currentVersion);
       }
-      const restartMsg = await invoke<string>("run_post_switch_action", { strategy: "restart_extension_host" });
+      const restartMsg = await invoke<string>("run_post_switch_action", {
+        strategy: "restart_extension_host",
+        editorTarget: settingsEditorTarget,
+      });
       setPostSwitchStrategy("hook");
       setStatusText(
         `${installMsg} ${restartMsg} 已切换为方案2（Hook 提速版）。${
@@ -3171,7 +3265,23 @@ function App() {
                 }
               }
             } else {
-              setStatusText(baseMessage);
+              if (switchedTo) {
+                try {
+                  const calibrated = await invoke<DashboardData>("apply_profile", {
+                    name: switchedTo,
+                    mode: "opencode",
+                  });
+                  if (!cancelled) {
+                    applyDashboard(calibrated, `${baseMessage}（已自动执行一次手动切号校准）`);
+                  }
+                } catch (err) {
+                  if (!cancelled) {
+                    setStatusText(`${baseMessage} 自动切后校准失败: ${String(err)}`);
+                  }
+                }
+              } else {
+                setStatusText(baseMessage);
+              }
             }
           } else if (
             !cancelled &&
@@ -3444,17 +3554,39 @@ function App() {
         </div>
       ) : null}
       {settingsOpen ? (
-        <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="VSCode Codex 设置中心" onClick={() => setSettingsOpen(false)}>
+        <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Codex 设置中心" onClick={() => setSettingsOpen(false)}>
           <section className="settings-panel" onClick={(e) => e.stopPropagation()}>
             <header className="settings-header">
-              <div className="settings-title">VSCode Codex 设置中心</div>
+              <div className="settings-title">Codex 设置中心</div>
               <button className="header-icon" type="button" onClick={() => setSettingsOpen(false)} title="关闭设置">
                 ✕
               </button>
             </header>
             <div className="settings-body">
               <section className="settings-group">
-                <div className="settings-group-title">VSCode Codex 切号后动作策略</div>
+                <div className="settings-group-title">支持列表</div>
+                <div className="supported-editor-switches" role="tablist" aria-label="支持编辑器切换">
+                  {SUPPORTED_EDITORS.map((editor) => (
+                    <button
+                      key={editor.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={settingsEditorTarget === editor.id}
+                      className={`supported-editor-switch ${settingsEditorTarget === editor.id ? "active" : ""}`}
+                      onClick={() => setSettingsEditorTarget(editor.id)}
+                    >
+                      <img className="supported-editor-icon" src={editor.icon} alt="" aria-hidden />
+                      <span className="supported-editor-name">{editor.name}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="supported-editor-desc">
+                  当前配置目标：{settingsTargetName}。下方策略和手动操作只针对当前选中的编辑器。
+                </div>
+              </section>
+
+              <section className="settings-group">
+                <div className="settings-group-title">{settingsTargetName} 切号后动作策略</div>
                 <label className={`strategy-item ${postSwitchStrategy === "restart_extension_host" ? "active" : ""}`}>
                   <input
                     type="radio"
@@ -3467,7 +3599,7 @@ function App() {
                   <div className="strategy-main">
                     <div className="strategy-title">方案1：重启 Extension Host（更稳）</div>
                     <div className="strategy-desc">
-                      面向 VSCode Codex：不重载整个窗口，仅重启扩展宿主。作为兜底策略最稳。
+                      面向 {settingsTargetName}：不重载整个窗口，仅重启扩展宿主。作为兜底策略最稳。
                     </div>
                   </div>
                 </label>
@@ -3483,14 +3615,14 @@ function App() {
                   <div className="strategy-main">
                     <div className="strategy-title">方案2：Hook 提速版（方案1语义）</div>
                     <div className="strategy-desc">
-                      面向 VSCode Codex：通过 Hook 触发 Extension Host 重启，保留方案1的会话兼容性，并减少切后等待时间。
+                      面向 {settingsTargetName}：通过 Hook 触发 Extension Host 重启，保留方案1的会话兼容性，并减少切后等待时间。
                     </div>
                   </div>
                 </label>
                 <div className={`runtime-alert ${vscodeStatus?.running && hookInstalled !== false ? "ok" : "warn"}`}>
                   <div className="runtime-alert-text">
                     <div className="runtime-status-line">
-                      <span className="runtime-status-label">VSCode Codex 状态:</span>
+                      <span className="runtime-status-label">{settingsTargetName} 状态:</span>
                       <span
                         className={`runtime-status-badge ${
                           vscodeStatus === null ? "unknown" : vscodeStatus.running ? "ok" : "warn"
@@ -3518,12 +3650,12 @@ function App() {
                       </span>
                     </div>
                     {vscodeStatus?.running === false ? (
-                      <div className="runtime-alert-tip">VSCode Codex 未运行，无法注入 Hook。请先启动 VSCode。</div>
+                      <div className="runtime-alert-tip">{settingsTargetName} 未运行，无法注入 Hook。请先启动 {settingsTargetShortName}。</div>
                     ) : null}
                   </div>
                   <div className="runtime-alert-actions">
                     <button className="settings-btn" type="button" disabled={uiBusy} onClick={() => void refreshVsCodeStatus(false)}>
-                      检测 VSCode Codex
+                      检测 {settingsTargetName}
                     </button>
                     <button className="settings-btn" type="button" disabled={uiBusy} onClick={() => void refreshHookStatus(false)}>
                       检测 Codex Hook
@@ -3534,7 +3666,7 @@ function App() {
                         type="button"
                         disabled={uiBusy || vscodeStatus?.running === false}
                         onClick={() => void onInjectHookOneClick()}
-                        title={vscodeStatus?.running === false ? "VSCode Codex 未运行，无法注入" : "一键注入并启用方案2提速版"}
+                        title={vscodeStatus?.running === false ? `${settingsTargetName} 未运行，无法注入` : "一键注入并启用方案2提速版"}
                       >
                         一键注入并启用方案2提速版
                       </button>
@@ -3556,8 +3688,8 @@ function App() {
                     onClick={() => void onInstallCodexHook()}
                     title={
                       vscodeStatus?.running === false
-                        ? "VSCode Codex 未运行，无法注入"
-                        : "首次安装后请点一次；后续仅在 VSCode Codex 扩展更新或 Hook 未注入/版本过旧时再点"
+                        ? `${settingsTargetName} 未运行，无法注入`
+                        : `首次安装后请点一次；后续仅在 ${settingsTargetName} 扩展更新或 Hook 未注入/版本过旧时再点`
                     }
                   >
                     安装/更新方案2 Hook 提速版
@@ -3854,16 +3986,12 @@ function App() {
                           profile={liveSyncedProfile}
                           index={idx}
                           selected={selected === p.name}
-                          isModeActive={
-                            (activeAppMode === "opencode"
-                              ? currentProfileName ?? modeActiveProfileName
-                              : modeActiveProfileName) === p.name
-                          }
+                          isModeActive={modeActiveProfileName === p.name}
                           busy={uiBusy}
-                          showLiveQuerying={p.name === currentProfileName}
+                          showLiveQuerying={p.name === liveQueryProfileName}
                           isQuotaRefreshing={quotaQuerying && refreshingProfileNameSet.has(p.name)}
                           liveQueryError={
-                            p.name === currentProfileName &&
+                            p.name === liveQueryProfileName &&
                             (!dashboard?.currentErrorMode || dashboard.currentErrorMode === activeAppMode)
                               ? dashboard?.currentError ?? null
                               : null

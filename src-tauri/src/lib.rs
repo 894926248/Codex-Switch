@@ -251,6 +251,7 @@ const CODEX_SWITCH_HOOK_FRAGMENT_V1: &str = r#"at.commands.registerCommand("chat
 const CODEX_SWITCH_HOOK_FRAGMENT_V2: &str = r#"at.commands.registerCommand("chatgpt.codexSwitchRestartRuntime",async()=>{let ge;try{let ye=f.teardownProcess();ye&&typeof ye.then=="function"&&await ye}catch{};await new Promise(ye=>setTimeout(ye,120));ge=f.startCodexProcess();if(!ge.success){try{let ye=f.teardownProcess();ye&&typeof ye.then=="function"&&await ye}catch{};await new Promise(ye=>setTimeout(ye,220));ge=f.startCodexProcess()}!ge.success&&ge.errorMessage&&K().error(ge.errorMessage)})"#;
 const CODEX_SWITCH_HOOK_WATCH_MARKER: &str = "codexSwitchAuthWatchV1";
 const CODEX_SWITCH_HOOK_SIGNAL_MARKER: &str = "codexSwitchSignalWatchV1";
+const CODEX_SWITCH_HOOK_KIRO_SIGNAL_MARKER: &str = "codexSwitchKiroSignalWatchV1";
 const CODEX_SWITCH_HOOK_SIGNAL_FILE_NAME: &str = "hook-restart.signal";
 const CODEX_SWITCH_HOOK_NEWCHAT_MARKER: &str = "codexSwitchNewChatWatchV9";
 const CODEX_SWITCH_HOOK_NEWCHAT_MARKER_V8: &str = "codexSwitchNewChatWatchV8";
@@ -285,6 +286,7 @@ const CODEX_SWITCH_HOOK_SIGNAL_WATCH_FRAGMENT_ACCEL_V2: &str = r#"(()=>{let ge=n
 const CODEX_SWITCH_HOOK_FRAGMENT_ACCEL: &str = r#"at.commands.registerCommand("chatgpt.codexSwitchRestartRuntime",async()=>{try{try{let codexSwitchToastV1=at&&at.window&&typeof at.window.showInformationMessage=="function"?at.window.showInformationMessage("Codex Switch: Account switched, reconnecting Codex..."):null;codexSwitchToastV1&&typeof codexSwitchToastV1.then=="function"&&codexSwitchToastV1.catch(()=>{})}catch{}await new Promise(codexSwitchToastDelay=>setTimeout(codexSwitchToastDelay,260));let codexSwitchRestartExtHostV1=at.commands.executeCommand("workbench.action.restartExtensionHost");codexSwitchRestartExtHostV1&&typeof codexSwitchRestartExtHostV1.then=="function"&&await codexSwitchRestartExtHostV1.catch(()=>{})}catch{}})"#;
 const CODEX_SWITCH_HOOK_AUTH_WATCH_FRAGMENT_ACCEL: &str = r#"(()=>{let ge=null;try{let codexSwitchAuthWatchV1=require("os"),ye=require("path"),be=require("fs"),Ee=ye.join(codexSwitchAuthWatchV1.homedir(),".codex","auth.json"),Se="",Me=async()=>{try{try{let codexSwitchToastV1=at&&at.window&&typeof at.window.showInformationMessage=="function"?at.window.showInformationMessage("Codex Switch: Account switched, reconnecting Codex..."):null;codexSwitchToastV1&&typeof codexSwitchToastV1.then=="function"&&codexSwitchToastV1.catch(()=>{})}catch{}await new Promise(codexSwitchToastDelay=>setTimeout(codexSwitchToastDelay,260));let codexSwitchRestartExtHostV1=at.commands.executeCommand("workbench.action.restartExtensionHost");codexSwitchRestartExtHostV1&&typeof codexSwitchRestartExtHostV1.then=="function"&&await codexSwitchRestartExtHostV1.catch(()=>{})}catch{}},Le=async()=>{try{if(!be.existsSync(Ee))return;let Te=JSON.parse(be.readFileSync(Ee,"utf8")),Pe=Te&&Te.tokens&&Te.tokens.account_id?String(Te.tokens.account_id):"";if(!Pe)return;if(Se&&Pe!==Se){await Me()}Se=Pe}catch{}};Le();let Te=setInterval(()=>{Le()},500);ge={dispose(){try{clearInterval(Te)}catch{}}}}catch{}return ge||{dispose(){}}})()"#;
 const CODEX_SWITCH_HOOK_SIGNAL_WATCH_FRAGMENT_ACCEL: &str = r#"(()=>{let ge=null;try{let codexSwitchSignalWatchV1=require("os"),ye=require("path"),be=require("fs"),Ee=ye.join(codexSwitchSignalWatchV1.homedir(),".codex_account_switcher","hook-restart.signal"),Se="",Me=async()=>{try{try{let codexSwitchToastV1=at&&at.window&&typeof at.window.showInformationMessage=="function"?at.window.showInformationMessage("Codex Switch: Account switched, reconnecting Codex..."):null;codexSwitchToastV1&&typeof codexSwitchToastV1.then=="function"&&codexSwitchToastV1.catch(()=>{})}catch{}await new Promise(codexSwitchToastDelay=>setTimeout(codexSwitchToastDelay,260));let codexSwitchRestartExtHostV1=at.commands.executeCommand("workbench.action.restartExtensionHost");codexSwitchRestartExtHostV1&&typeof codexSwitchRestartExtHostV1.then=="function"&&await codexSwitchRestartExtHostV1.catch(()=>{})}catch{}},Le=async()=>{try{if(!be.existsSync(Ee))return;let Te=be.readFileSync(Ee,"utf8").trim();if(!Te)return;if(Se&&Te!==Se){await Me()}Se=Te}catch{}};Le();let Te=setInterval(()=>{Le()},300);ge={dispose(){try{clearInterval(Te)}catch{}}}}catch{}return ge||{dispose(){}}})()"#;
+const CODEX_SWITCH_HOOK_KIRO_SIGNAL_WATCH_FRAGMENT: &str = r#"(()=>{let codexSwitchKiroSignalWatchV1=null;try{const vscode=require("vscode"),os=require("os"),path=require("path"),fs=require("fs"),signalPath=path.join(os.homedir(),".codex_account_switcher","hook-restart.signal");let previous="";const restart=async()=>{try{await vscode.commands.executeCommand("workbench.action.restartExtensionHost")}catch{try{await vscode.commands.executeCommand("workbench.action.reloadWindow")}catch{}}},tick=async()=>{try{if(!fs.existsSync(signalPath))return;const token=String(fs.readFileSync(signalPath,"utf8")||"").trim();if(!token)return;if(previous&&token!==previous)await restart();previous=token}catch{}};void tick();const timer=setInterval(()=>{void tick()},300);codexSwitchKiroSignalWatchV1={dispose(){try{clearInterval(timer)}catch{}}}}catch{}return codexSwitchKiroSignalWatchV1||{dispose(){}}})()"#;
 const CODEX_SWITCH_HOOK_BACKUP_SUFFIX: &str = ".codex-switch.bak";
 
 type CmdResult<T> = Result<T, String>;
@@ -847,7 +849,42 @@ fn codex_home() -> CmdResult<PathBuf> {
 }
 
 fn opencode_data_dir() -> CmdResult<PathBuf> {
-    Ok(home_dir()?.join(".local").join("share").join("opencode"))
+    #[cfg(target_os = "windows")]
+    {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+
+        if let Some(value) = env::var_os("OPENCODE_DATA_DIR") {
+            let path = PathBuf::from(value);
+            if !path.as_os_str().is_empty() {
+                candidates.push(path);
+            }
+        }
+        if let Some(value) = env::var_os("APPDATA") {
+            candidates.push(PathBuf::from(value).join("opencode"));
+        }
+        if let Some(value) = env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(value).join("opencode"));
+        }
+        candidates.push(home_dir()?.join(".local").join("share").join("opencode"));
+
+        if let Some(found) = candidates
+            .iter()
+            .find(|path| path.join(AUTH_FILE_NAME).exists())
+            .cloned()
+        {
+            return Ok(found);
+        }
+
+        return candidates
+            .into_iter()
+            .next()
+            .ok_or_else(|| "无法定位 OpenCode 数据目录。".to_string());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(home_dir()?.join(".local").join("share").join("opencode"))
+    }
 }
 
 fn opencode_auth_file() -> CmdResult<PathBuf> {
@@ -4136,6 +4173,7 @@ fn candidate_codex_paths() -> Vec<PathBuf> {
             home.join(".vscode").join("extensions"),
             home.join(".cursor").join("extensions"),
             home.join(".windsurf").join("extensions"),
+            home.join(".kiro").join("extensions"),
         ] {
             if !ext_base.exists() {
                 continue;
@@ -4144,7 +4182,7 @@ fn candidate_codex_paths() -> Vec<PathBuf> {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     let file_name = entry.file_name().to_string_lossy().to_string();
-                    if !file_name.starts_with("openai.chatgpt-") {
+                    if !(file_name.starts_with("openai.chatgpt-") || file_name == "openai.chatgpt") {
                         continue;
                     }
                     dedupe_push_path(
@@ -4210,6 +4248,8 @@ fn resolve_codex_binary() -> CmdResult<PathBuf> {
         if lower.contains("\\.vscode\\extensions\\openai.chatgpt-")
             || lower.contains("\\.cursor\\extensions\\openai.chatgpt-")
             || lower.contains("\\.windsurf\\extensions\\openai.chatgpt-")
+            || lower.contains("\\.kiro\\extensions\\openai.chatgpt-")
+            || lower.contains("\\.kiro\\extensions\\openai.chatgpt\\")
         {
             score += 8;
         }
@@ -4256,6 +4296,7 @@ fn candidate_chatgpt_extension_js_paths() -> Vec<PathBuf> {
         home.join(".vscode-insiders").join("extensions"),
         home.join(".cursor").join("extensions"),
         home.join(".windsurf").join("extensions"),
+        home.join(".kiro").join("extensions"),
     ];
 
     for ext_root in ext_roots {
@@ -4267,7 +4308,7 @@ fn candidate_chatgpt_extension_js_paths() -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let file_name = entry.file_name().to_string_lossy().to_string();
-            if !file_name.starts_with("openai.chatgpt-") {
+            if !(file_name.starts_with("openai.chatgpt-") || file_name == "openai.chatgpt") {
                 continue;
             }
             let js_path = entry.path().join("out").join("extension.js");
@@ -4361,6 +4402,7 @@ fn hook_has_auth_watch(content: &str) -> bool {
 
 fn hook_has_signal_watch(content: &str) -> bool {
     content.contains(CODEX_SWITCH_HOOK_SIGNAL_MARKER)
+        || content.contains(CODEX_SWITCH_HOOK_KIRO_SIGNAL_MARKER)
         || content.contains(CODEX_SWITCH_HOOK_SIGNAL_WATCH_FRAGMENT_ACCEL)
         || content.contains(CODEX_SWITCH_HOOK_SIGNAL_WATCH_FRAGMENT)
 }
@@ -4470,10 +4512,42 @@ fn hook_backup_path_for(extension_js: &Path) -> PathBuf {
     extension_js.with_file_name(format!("{file_name}{CODEX_SWITCH_HOOK_BACKUP_SUFFIX}"))
 }
 
-fn has_codex_hook_installed_internal() -> bool {
+fn is_kiro_extension_path(path: &Path) -> bool {
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    lower.contains("\\.kiro\\extensions\\openai.chatgpt")
+        || lower.contains("/.kiro/extensions/openai.chatgpt")
+}
+
+fn normalize_editor_target(target: Option<&str>) -> &'static str {
+    match target
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("kiro") => "kiro",
+        _ => "vscode",
+    }
+}
+
+fn path_matches_editor_target(path: &Path, target: Option<&str>) -> bool {
+    let editor = normalize_editor_target(target);
+    if editor == "kiro" {
+        is_kiro_extension_path(path)
+    } else {
+        !is_kiro_extension_path(path)
+    }
+}
+
+fn has_codex_hook_installed_internal(target: Option<&str>) -> bool {
     let paths = candidate_chatgpt_extension_js_paths();
     for path in paths {
+        if !path_matches_editor_target(&path, target) {
+            continue;
+        }
         if let Ok(content) = fs::read_to_string(&path) {
+            if is_kiro_extension_path(&path) && hook_has_signal_watch(&content) {
+                return true;
+            }
             if content.contains(CODEX_SWITCH_HOOK_COMMAND_ID)
                 && content.contains(CODEX_SWITCH_HOOK_ACCEL_MARKER)
                 && hook_has_auth_watch(&content)
@@ -4523,8 +4597,11 @@ fn has_codex_hook_newchat_watch_installed_internal() -> bool {
     false
 }
 
-fn install_codex_hook_internal() -> CmdResult<String> {
-    let paths = candidate_chatgpt_extension_js_paths();
+fn install_codex_hook_internal(target: Option<&str>) -> CmdResult<String> {
+    let paths: Vec<PathBuf> = candidate_chatgpt_extension_js_paths()
+        .into_iter()
+        .filter(|path| path_matches_editor_target(path, target))
+        .collect();
     if paths.is_empty() {
         return Err("未找到 openai.chatgpt 扩展文件，请先安装官方 Codex 扩展。".to_string());
     }
@@ -4654,11 +4731,20 @@ fn install_codex_hook_internal() -> CmdResult<String> {
             ));
             continue;
         } else {
-            if !content.contains(CODEX_SWITCH_HOOK_ANCHOR) {
+            if content.contains(CODEX_SWITCH_HOOK_ANCHOR) {
+                content.replacen(CODEX_SWITCH_HOOK_ANCHOR, &hook_inject_v4, 1)
+            } else if is_kiro_extension_path(&path) {
+                if content.contains(CODEX_SWITCH_HOOK_KIRO_SIGNAL_MARKER)
+                    || content.contains(CODEX_SWITCH_HOOK_KIRO_SIGNAL_WATCH_FRAGMENT)
+                {
+                    already.push(display);
+                    continue;
+                }
+                format!("{content}\n;{}\n", CODEX_SWITCH_HOOK_KIRO_SIGNAL_WATCH_FRAGMENT)
+            } else {
                 failed.push(format!("{display}: 未匹配到 Hook 注入锚点"));
                 continue;
             }
-            content.replacen(CODEX_SWITCH_HOOK_ANCHOR, &hook_inject_v4, 1)
         };
 
         if replaced == content {
@@ -6910,10 +6996,18 @@ fn sync_opencode_snapshot_from_live_auth_best_effort(target_dir: &Path) {
 fn apply_opencode_snapshot_to_live_auth(source_dir: &Path, backup_dir: &Path) -> CmdResult<()> {
     let snapshot_path = source_dir.join(OPENCODE_OPENAI_SNAPSHOT_FILE_NAME);
     if !snapshot_path.exists() {
-        let _ = ensure_opencode_snapshot_from_codex_auth(source_dir);
+        ensure_opencode_snapshot_from_codex_auth(source_dir).map_err(|e| {
+            format!(
+                "账号快照缺少 OpenCode 登录态快照，且自动补齐失败（{}）: {e}",
+                snapshot_path.display()
+            )
+        })?;
     }
     if !snapshot_path.exists() {
-        return Ok(());
+        return Err(format!(
+            "账号快照缺少 OpenCode 登录态快照，无法在 OpenCode 模式切号：{}",
+            snapshot_path.display()
+        ));
     }
     let snapshot_text = fs::read_to_string(&snapshot_path)
         .map_err(|e| format!("读取 OpenCode 快照失败 {}: {e}", snapshot_path.display()))?;
@@ -8980,7 +9074,7 @@ fn apply_profile_internal_for_mode(name: &str, mode: Option<&str>) -> CmdResult<
         "opencode" => {
             let _backup_name = apply_profile_snapshot_opencode_only(&source)?;
             // OpenCode 独立切号不应影响 Codex 当前账号指针。
-            load_dashboard_internal(false)
+            load_dashboard_internal_for_mode(true, Some(AutoSwitchMode::OpenCode))
         }
         other => Err(format!(
             "不支持的切号模式: {other}。可选值: gpt / opencode / both"
@@ -9294,6 +9388,21 @@ fn list_windows_vscode_cli_binaries() -> Vec<String> {
                 .join("bin")
                 .join("windsurf.cmd"),
         );
+        push_existing_path_candidate(entries, seen_keys, root.join("Kiro").join("Kiro.exe"));
+        push_existing_path_candidate(
+            entries,
+            seen_keys,
+            root.join("Kiro").join("bin").join("kiro.cmd"),
+        );
+        push_existing_path_candidate(
+            entries,
+            seen_keys,
+            root.join("Kiro")
+                .join("resources")
+                .join("app")
+                .join("bin")
+                .join("kiro.cmd"),
+        );
     };
 
     if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
@@ -9309,7 +9418,7 @@ fn list_windows_vscode_cli_binaries() -> Vec<String> {
         }
     }
 
-    for alias in ["code", "code-insiders", "cursor", "windsurf"] {
+    for alias in ["code", "code-insiders", "cursor", "windsurf", "kiro"] {
         if let Ok(output) = command_no_window("where").arg(alias).output() {
             if output.status.success() {
                 for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -9327,6 +9436,8 @@ fn list_windows_vscode_cli_binaries() -> Vec<String> {
                         || lower.ends_with("\\cursor.exe")
                         || lower.ends_with("\\windsurf.cmd")
                         || lower.ends_with("\\windsurf.exe")
+                        || lower.ends_with("\\kiro.cmd")
+                        || lower.ends_with("\\kiro.exe")
                     {
                         if let Some(bin_dir) = Path::new(path).parent() {
                             if lower.ends_with("\\code.cmd")
@@ -9363,6 +9474,15 @@ fn list_windows_vscode_cli_binaries() -> Vec<String> {
                                     );
                                 }
                             }
+                            if lower.ends_with("\\kiro.cmd") {
+                                if let Some(install_dir) = bin_dir.parent() {
+                                    push_existing_path_candidate(
+                                        &mut bins,
+                                        &mut seen,
+                                        install_dir.join("Kiro.exe"),
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -9374,37 +9494,57 @@ fn list_windows_vscode_cli_binaries() -> Vec<String> {
     push_unique_text(&mut bins, &mut seen, "code-insiders".to_string());
     push_unique_text(&mut bins, &mut seen, "cursor".to_string());
     push_unique_text(&mut bins, &mut seen, "windsurf".to_string());
+    push_unique_text(&mut bins, &mut seen, "kiro".to_string());
     bins
 }
 
 #[cfg(target_os = "windows")]
 fn preferred_editor_kinds_internal() -> Vec<&'static str> {
-    let mut kinds: Vec<&'static str> = Vec::new();
-    if let Some(latest_log) = find_latest_codex_extension_log_file() {
-        if let Some(kind) = editor_kind_from_codex_log_path(&latest_log) {
+    fn push_kind_unique(kinds: &mut Vec<&'static str>, kind: &'static str) {
+        if !kinds.contains(&kind) {
             kinds.push(kind);
         }
     }
+
+    let mut kinds: Vec<&'static str> = Vec::new();
+
+    if let Some(latest_log) = find_latest_codex_extension_log_file() {
+        if let Some(kind) = editor_kind_from_codex_log_path(&latest_log) {
+            push_kind_unique(&mut kinds, kind);
+        }
+    }
+
+    let counts = count_windows_processes_by_images(&[
+        "Windsurf.exe",
+        "Cursor.exe",
+        "Code.exe",
+        "Code - Insiders.exe",
+        "Kiro.exe",
+    ]);
+    let windsurf_running = counts.get("windsurf.exe").copied().unwrap_or(0) > 0;
+    let cursor_running = counts.get("cursor.exe").copied().unwrap_or(0) > 0;
+    let kiro_running = counts.get("kiro.exe").copied().unwrap_or(0) > 0;
+    let vscode_running = counts.get("code.exe").copied().unwrap_or(0) > 0
+        || counts.get("code - insiders.exe").copied().unwrap_or(0) > 0;
+
+    if kiro_running {
+        push_kind_unique(&mut kinds, "kiro");
+    }
+    if windsurf_running {
+        push_kind_unique(&mut kinds, "windsurf");
+    }
+    if cursor_running {
+        push_kind_unique(&mut kinds, "cursor");
+    }
+    if vscode_running {
+        push_kind_unique(&mut kinds, "vscode");
+    }
+
     if kinds.is_empty() {
-        let counts = count_windows_processes_by_images(&[
-            "Windsurf.exe",
-            "Cursor.exe",
-            "Code.exe",
-            "Code - Insiders.exe",
-        ]);
-        let windsurf_running = counts.get("windsurf.exe").copied().unwrap_or(0) > 0;
-        let cursor_running = counts.get("cursor.exe").copied().unwrap_or(0) > 0;
-        let vscode_running = counts.get("code.exe").copied().unwrap_or(0) > 0
-            || counts.get("code - insiders.exe").copied().unwrap_or(0) > 0;
-        if windsurf_running {
-            kinds.push("windsurf");
-        }
-        if cursor_running {
-            kinds.push("cursor");
-        }
-        if vscode_running {
-            kinds.push("vscode");
-        }
+        push_kind_unique(&mut kinds, "kiro");
+        push_kind_unique(&mut kinds, "windsurf");
+        push_kind_unique(&mut kinds, "cursor");
+        push_kind_unique(&mut kinds, "vscode");
     }
     kinds
 }
@@ -9419,6 +9559,7 @@ fn build_editor_command_uris(command_id: &str, preferred_kinds: &[&str]) -> Vec<
         vec![
             format!("windsurf://command/{command_id}"),
             format!("cursor://command/{command_id}"),
+            format!("kiro://command/{command_id}"),
             format!("vscode://command/{command_id}"),
         ]
     } else {
@@ -9427,6 +9568,7 @@ fn build_editor_command_uris(command_id: &str, preferred_kinds: &[&str]) -> Vec<
             .map(|kind| match *kind {
                 "windsurf" => format!("windsurf://command/{command_id}"),
                 "cursor" => format!("cursor://command/{command_id}"),
+                "kiro" => format!("kiro://command/{command_id}"),
                 _ => format!("vscode://command/{command_id}"),
             })
             .collect()
@@ -9450,14 +9592,17 @@ fn invoke_vscode_command_uri_internal(command_id: &str, success_text: &str) -> C
                 let lower = bin.to_lowercase();
                 let is_windsurf = lower.contains("windsurf");
                 let is_cursor = lower.contains("cursor");
+                let is_kiro = lower.contains("kiro");
                 let is_vscode = !is_windsurf
                     && !is_cursor
+                    && !is_kiro
                     && (lower.contains("code-insiders")
                         || lower.contains("\\code")
                         || lower.ends_with("code")
                         || lower.ends_with("code.exe"));
                 let matched = (preferred_kinds.contains(&"windsurf") && is_windsurf)
                     || (preferred_kinds.contains(&"cursor") && is_cursor)
+                    || (preferred_kinds.contains(&"kiro") && is_kiro)
                     || (preferred_kinds.contains(&"vscode") && is_vscode);
                 if matched {
                     let key = lower;
@@ -9473,6 +9618,9 @@ fn invoke_vscode_command_uri_internal(command_id: &str, success_text: &str) -> C
                 if preferred_kinds.contains(&"cursor") {
                     out.push("cursor".to_string());
                 }
+                if preferred_kinds.contains(&"kiro") {
+                    out.push("kiro".to_string());
+                }
                 if preferred_kinds.contains(&"vscode") {
                     out.push("code-insiders".to_string());
                     out.push("code".to_string());
@@ -9487,6 +9635,7 @@ fn invoke_vscode_command_uri_internal(command_id: &str, success_text: &str) -> C
         "code-insiders".to_string(),
         "cursor".to_string(),
         "windsurf".to_string(),
+        "kiro".to_string(),
     ];
 
     for command_uri in &command_uris {
@@ -9770,7 +9919,7 @@ fn list_windows_extension_host_pids() -> Vec<u32> {
 
     if pids.is_empty() {
         // Fallback for environments where `code --status` output is unavailable.
-        let script = r#"Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'Code.exe' -or $_.Name -eq 'Code - Insiders.exe') -and $_.CommandLine -match '--utility-sub-type=node\.mojom\.NodeService' -and $_.CommandLine -match '--inspect-port=0' } | ForEach-Object { $_.ProcessId }"#;
+        let script = r#"Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'Code.exe' -or $_.Name -eq 'Code - Insiders.exe' -or $_.Name -eq 'Cursor.exe' -or $_.Name -eq 'Windsurf.exe' -or $_.Name -eq 'Kiro.exe') -and $_.CommandLine -match '--utility-sub-type=node\.mojom\.NodeService' -and $_.CommandLine -match '--inspect-port=0' } | ForEach-Object { $_.ProcessId }"#;
         let output = command_no_window("powershell")
             .args(["-NoProfile", "-Command", script])
             .output();
@@ -9932,27 +10081,36 @@ fn get_opencode_process_count_internal() -> u64 {
     }
 }
 
-fn get_vscode_status_internal() -> VsCodeStatusView {
+fn get_vscode_status_internal(target: Option<&str>) -> VsCodeStatusView {
+    let editor = normalize_editor_target(target);
     #[cfg(target_os = "windows")]
     let process_count = {
-        let counts = count_windows_processes_by_images(&[
-            "Code.exe",
-            "Code - Insiders.exe",
-            "Cursor.exe",
-            "Windsurf.exe",
-        ]);
+        let counts = if editor == "kiro" {
+            count_windows_processes_by_images(&["Kiro.exe"])
+        } else {
+            count_windows_processes_by_images(&[
+                "Code.exe",
+                "Code - Insiders.exe",
+                "Cursor.exe",
+                "Windsurf.exe",
+            ])
+        };
         counts.values().sum::<u64>()
     };
 
     #[cfg(not(target_os = "windows"))]
     let process_count = {
-        count_unix_processes_by_name("code")
-            + count_unix_processes_by_name("code-insiders")
-            + count_unix_processes_by_name("Code")
-            + count_unix_processes_by_name("cursor")
-            + count_unix_processes_by_name("Cursor")
-            + count_unix_processes_by_name("windsurf")
-            + count_unix_processes_by_name("Windsurf")
+        if editor == "kiro" {
+            count_unix_processes_by_name("kiro") + count_unix_processes_by_name("Kiro")
+        } else {
+            count_unix_processes_by_name("code")
+                + count_unix_processes_by_name("code-insiders")
+                + count_unix_processes_by_name("Code")
+                + count_unix_processes_by_name("cursor")
+                + count_unix_processes_by_name("Cursor")
+                + count_unix_processes_by_name("windsurf")
+                + count_unix_processes_by_name("Windsurf")
+        }
     };
 
     VsCodeStatusView {
@@ -10100,7 +10258,7 @@ fn trigger_codex_hook_restart_internal(prefer_signal: bool) -> CmdResult<String>
 fn run_post_switch_action_internal(strategy: &str) -> CmdResult<String> {
     match strategy.trim() {
         "hook" => {
-            if !has_codex_hook_installed_internal() {
+            if !has_codex_hook_installed_internal(None) {
                 return Err(
                     "方案2 Hook 提速版未安装。请先在设置中心执行“安装/更新方案2 Hook 提速版”。"
                         .to_string(),
@@ -10158,7 +10316,7 @@ fn trigger_chatgpt_new_chat_reset_internal(
     let mut command_sent = false;
 
     if allow_hook_auto_install && !has_codex_hook_newchat_watch_installed_internal() {
-        if let Ok(msg) = install_codex_hook_internal() {
+        if let Ok(msg) = install_codex_hook_internal(None) {
             notes.push(format!("已自动更新 Hook 提速版。{msg}"));
         }
     }
@@ -10959,7 +11117,7 @@ fn candidate_vscode_user_roots() -> Vec<PathBuf> {
     {
         if let Ok(appdata) = env::var("APPDATA") {
             let base = PathBuf::from(appdata);
-            for product in ["Code", "Code - Insiders", "Cursor", "Windsurf"] {
+            for product in ["Code", "Code - Insiders", "Cursor", "Windsurf", "Kiro"] {
                 let root = base.join(product).join("User");
                 if root.exists() {
                     push_unique_dir_entry(&mut roots, &mut seen, root);
@@ -10975,6 +11133,7 @@ fn candidate_vscode_user_roots() -> Vec<PathBuf> {
                 ".config/Code - Insiders/User",
                 ".config/Cursor/User",
                 ".config/Windsurf/User",
+                ".config/Kiro/User",
             ] {
                 let root = home.join(rel);
                 if root.exists() {
@@ -11296,7 +11455,7 @@ fn candidate_vscode_log_roots() -> Vec<PathBuf> {
     {
         if let Ok(appdata) = env::var("APPDATA") {
             let base = PathBuf::from(appdata);
-            for product in ["Code", "Code - Insiders", "Cursor", "Windsurf"] {
+            for product in ["Code", "Code - Insiders", "Cursor", "Windsurf", "Kiro"] {
                 let path = base.join(product).join("logs");
                 if path.exists() {
                     roots.push(path);
@@ -11312,6 +11471,7 @@ fn candidate_vscode_log_roots() -> Vec<PathBuf> {
                 ".config/Code - Insiders/logs",
                 ".config/Cursor/logs",
                 ".config/Windsurf/logs",
+                ".config/Kiro/logs",
             ] {
                 let path = home.join(rel);
                 if path.exists() {
@@ -11372,6 +11532,9 @@ fn editor_kind_from_codex_log_path(path: &Path) -> Option<&'static str> {
     }
     if text.contains("\\cursor\\logs\\") || text.contains("/cursor/logs/") {
         return Some("cursor");
+    }
+    if text.contains("\\kiro\\logs\\") || text.contains("/kiro/logs/") {
+        return Some("kiro");
     }
     if text.contains("\\code - insiders\\logs\\")
         || text.contains("\\code\\logs\\")
@@ -11631,6 +11794,90 @@ fn maybe_sync_live_quota_for_trigger(
             }
         }
     }
+}
+
+fn active_profile_name_for_mode(
+    store: &StoreData,
+    mode: AutoSwitchMode,
+    now_ms: i64,
+) -> Option<String> {
+    match mode {
+        AutoSwitchMode::Gpt => store.active_profile.clone(),
+        AutoSwitchMode::OpenCode => {
+            let live_workspace_id = live_opencode_workspace_id_internal();
+            let cached_quota = cached_opencode_quota_snapshot(now_ms).map(|(quota, _)| quota);
+            let identity_workspace_id = live_workspace_id
+                .clone()
+                .or_else(|| cached_quota.as_ref().and_then(|quota| quota.workspace_id.clone()));
+            let identity_email = cached_quota
+                .as_ref()
+                .and_then(|quota| normalize_identity_value(quota.email.as_deref()));
+
+            if let Some(matched) = find_profile_name_by_identity_prefer_existing(
+                store,
+                identity_workspace_id.as_deref(),
+                identity_email.as_deref(),
+            ) {
+                return Some(matched);
+            }
+
+            find_profile_name_by_identity_prefer_existing(store, live_workspace_id.as_deref(), None)
+        }
+    }
+}
+
+fn opencode_live_auth_workspace_id() -> Option<String> {
+    let auth_path = opencode_auth_file().ok()?;
+    let entry = read_openai_entry_from_opencode_auth_file(&auth_path)?;
+    opencode_workspace_id_from_openai_entry(&entry)
+}
+
+fn opencode_live_auth_entry() -> Option<Value> {
+    let auth_path = opencode_auth_file().ok()?;
+    read_openai_entry_from_opencode_auth_file(&auth_path)
+}
+
+fn opencode_snapshot_entry_from_record(name: &str, record: &Map<String, Value>) -> Option<Value> {
+    let snapshot_dir = record_snapshot_dir(name, record).ok()?;
+    let snapshot_path = snapshot_dir.join(OPENCODE_OPENAI_SNAPSHOT_FILE_NAME);
+    if snapshot_path.exists() {
+        let text = fs::read_to_string(&snapshot_path).ok()?;
+        let value = serde_json::from_str::<Value>(&text).ok()?;
+        if value.is_object() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn opencode_live_matches_target_profile(store: &StoreData, target_profile: &str) -> bool {
+    // Fast path: check the auth file identity directly (no API call).
+    // After apply_opencode_snapshot_to_live_auth, the file already contains the
+    // target account's credentials, so we just need to read workspace_id from it
+    // and map it back to a profile name.
+    let live_workspace_id = match opencode_live_auth_workspace_id() {
+        Some(v) => v,
+        None => return false,
+    };
+
+    // Read workspace_id from target profile record for direct comparison.
+    if let Some(record) = store.profiles.get(target_profile).and_then(Value::as_object) {
+        if let Some(target_wid) = read_workspace_id_from_record_or_auth(target_profile, record) {
+            if live_workspace_id.eq_ignore_ascii_case(target_wid.trim()) {
+                return true;
+            }
+        }
+    }
+
+    // Fallback: identity-based reverse lookup.
+    let matched = find_profile_name_by_identity_prefer_existing(
+        store,
+        Some(live_workspace_id.as_str()),
+        None,
+    );
+    matched
+        .map(|name| name.eq_ignore_ascii_case(target_profile))
+        .unwrap_or(false)
 }
 
 fn soft_trigger_hit(five_hour: Option<i64>, one_week: Option<i64>) -> bool {
@@ -11987,17 +12234,7 @@ fn auto_switch_tick_internal(
     }
 
     let store_for_trigger = load_store()?;
-    let active_profile_name = match mode {
-        AutoSwitchMode::Gpt => store_for_trigger.active_profile.clone(),
-        AutoSwitchMode::OpenCode => {
-            let live_workspace_id = live_opencode_workspace_id_internal();
-            find_profile_name_by_identity_prefer_existing(
-                &store_for_trigger,
-                live_workspace_id.as_deref(),
-                None,
-            )
-        }
-    };
+    let active_profile_name = active_profile_name_for_mode(&store_for_trigger, mode, now_ms);
     let (current_five, current_week) = current_quota_for_trigger(
         runtime,
         &store_for_trigger,
@@ -12014,17 +12251,7 @@ fn auto_switch_tick_internal(
     if runtime.pending_reason.is_some() {
         maybe_sync_live_quota_for_trigger(runtime, mode, &store_for_trigger, now_ms, false);
         now_ms = now_ts_ms();
-        let active_profile_name = match mode {
-            AutoSwitchMode::Gpt => store_for_trigger.active_profile.clone(),
-            AutoSwitchMode::OpenCode => {
-                let live_workspace_id = live_opencode_workspace_id_internal();
-                find_profile_name_by_identity_prefer_existing(
-                    &store_for_trigger,
-                    live_workspace_id.as_deref(),
-                    None,
-                )
-            }
-        };
+        let active_profile_name = active_profile_name_for_mode(&store_for_trigger, mode, now_ms);
         let (live_five, live_week) = current_quota_for_trigger(
             runtime,
             &store_for_trigger,
@@ -12075,17 +12302,24 @@ fn auto_switch_tick_internal(
 
     let mut store = load_store()?;
     let names = list_profile_names(&store);
-    let active = match mode {
-        AutoSwitchMode::Gpt => store.active_profile.clone(),
-        AutoSwitchMode::OpenCode => {
-            let live_workspace_id = live_opencode_workspace_id_internal();
-            find_profile_name_by_identity_prefer_existing(
-                &store,
-                live_workspace_id.as_deref(),
-                None,
-            )
-        }
+    let active = active_profile_name_for_mode(&store, mode, now_ms);
+    let live_workspace_id = if matches!(mode, AutoSwitchMode::OpenCode) {
+        opencode_live_auth_workspace_id().and_then(|v| normalize_identity_value(Some(v.as_str())))
+    } else {
+        None
     };
+    let live_auth_entry = if matches!(mode, AutoSwitchMode::OpenCode) {
+        opencode_live_auth_entry()
+    } else {
+        None
+    };
+    let active_identity = active.as_ref().and_then(|name| {
+        let record = store.profiles.get(name).and_then(Value::as_object)?;
+        let workspace_id =
+            normalize_identity_value(read_workspace_id_from_record_or_auth(name, record).as_deref());
+        let email = read_email_from_record(record);
+        Some((workspace_id, email))
+    });
     let mut picked: Option<String> = None;
     let mut checked = 0usize;
     for name in names {
@@ -12097,6 +12331,42 @@ fn auto_switch_tick_internal(
         };
         if !profile_supports_mode(record, mode) {
             continue;
+        }
+        if matches!(mode, AutoSwitchMode::OpenCode) {
+            let candidate_workspace_id = normalize_identity_value(
+                read_workspace_id_from_record_or_auth(&name, record).as_deref(),
+            );
+            if let (Some(live_entry), Some(snapshot_entry)) = (
+                live_auth_entry.as_ref(),
+                opencode_snapshot_entry_from_record(&name, record).as_ref(),
+            ) {
+                if snapshot_entry == live_entry {
+                    continue;
+                }
+            }
+            if let Some((active_workspace_id, active_email)) = &active_identity {
+                let candidate_email = read_email_from_record(record);
+                let same_workspace = active_workspace_id
+                    .as_deref()
+                    .zip(candidate_workspace_id.as_deref())
+                    .map(|(left, right)| left == right)
+                    .unwrap_or(false);
+                let same_email = active_email
+                    .as_deref()
+                    .zip(candidate_email.as_deref())
+                    .map(|(left, right)| left == right)
+                    .unwrap_or(false);
+                if same_workspace && active_email.is_some() && same_email {
+                    continue;
+                }
+            }
+            if let Some(live_wid) = live_workspace_id.as_deref() {
+                if candidate_workspace_id.as_deref() == Some(live_wid)
+                    && record.get("email").and_then(Value::as_str).is_none()
+                {
+                    continue;
+                }
+            }
         }
         checked += 1;
         let refreshed = refresh_one_profile_quota_with_timeout(
@@ -12143,17 +12413,7 @@ fn auto_switch_tick_internal(
     now_ms = now_ts_ms();
     maybe_sync_live_quota_for_trigger(runtime, mode, &store, now_ms, true);
     now_ms = now_ts_ms();
-    let active_profile_name = match mode {
-        AutoSwitchMode::Gpt => store.active_profile.clone(),
-        AutoSwitchMode::OpenCode => {
-            let live_workspace_id = live_opencode_workspace_id_internal();
-            find_profile_name_by_identity_prefer_existing(
-                &store,
-                live_workspace_id.as_deref(),
-                None,
-            )
-        }
-    };
+    let active_profile_name = active_profile_name_for_mode(&store, mode, now_ms);
     let (latest_five, latest_week) = current_quota_for_trigger(
         runtime,
         &store,
@@ -12201,7 +12461,39 @@ fn auto_switch_tick_internal(
     let dashboard = match mode {
         AutoSwitchMode::Gpt => apply_profile_internal_for_mode(&target_profile, Some("gpt"))?,
         AutoSwitchMode::OpenCode => {
-            apply_profile_internal_for_mode(&target_profile, Some("opencode"))?
+            let dashboard =
+                apply_profile_internal_for_mode(&target_profile, Some("opencode"))?;
+            let latest_store = load_store()?;
+            if !opencode_live_matches_target_profile(&latest_store, &target_profile) {
+                // Retry once after a short delay.
+                thread::sleep(Duration::from_millis(200));
+                let _ = apply_profile_internal_for_mode(&target_profile, Some("opencode"));
+                let retry_store = load_store()?;
+                if !opencode_live_matches_target_profile(&retry_store, &target_profile) {
+                    runtime.no_candidate_until_ms =
+                        now_ts_ms() + AUTO_SWITCH_NO_CANDIDATE_COOLDOWN_MS;
+                    let mut result = AutoSwitchTickResult::new("switch_verify_failed");
+                    result.message = Some(
+                        "自动切号后校验未通过：OpenCode auth 文件未切到目标账号。"
+                            .to_string(),
+                    );
+                    fill_pending_reason(&mut result, runtime);
+                    return Ok(result);
+                }
+            }
+            // Invalidate stale OpenCode quota cache so next poll picks up fresh identity.
+            update_opencode_quota_runtime_cache(
+                &AccountQuota {
+                    email: None,
+                    workspace_name: None,
+                    workspace_id: None,
+                    plan_type: None,
+                    five_hour: None,
+                    one_week: None,
+                },
+                0,
+            );
+            dashboard
         }
     };
     now_ms = now_ts_ms();
@@ -12421,7 +12713,7 @@ fn reorder_profiles(names: Vec<String>) -> CmdResult<DashboardData> {
 async fn reload_vscode_window(app: tauri::AppHandle) -> CmdResult<String> {
     let mut fallback_notes: Vec<String> = Vec::new();
 
-    if has_codex_hook_installed_internal() {
+    if has_codex_hook_installed_internal(None) {
         let prefer_signal = has_codex_hook_signal_watch_installed_internal();
         let hook_result = tauri::async_runtime::spawn_blocking(move || {
             trigger_codex_hook_restart_internal(prefer_signal)
@@ -12507,13 +12799,13 @@ fn restart_extension_host() -> CmdResult<String> {
 }
 
 #[tauri::command]
-fn install_codex_hook() -> CmdResult<String> {
-    install_codex_hook_internal()
+fn install_codex_hook(editor_target: Option<String>) -> CmdResult<String> {
+    install_codex_hook_internal(editor_target.as_deref())
 }
 
 #[tauri::command]
-async fn get_vscode_status() -> CmdResult<VsCodeStatusView> {
-    tauri::async_runtime::spawn_blocking(get_vscode_status_internal)
+async fn get_vscode_status(editor_target: Option<String>) -> CmdResult<VsCodeStatusView> {
+    tauri::async_runtime::spawn_blocking(move || get_vscode_status_internal(editor_target.as_deref()))
         .await
         .map_err(|e| format!("检测 VS Code 状态任务执行失败: {e}"))
 }
@@ -12533,8 +12825,10 @@ async fn get_codex_extension_info() -> CmdResult<CodexExtensionInfoView> {
 }
 
 #[tauri::command]
-async fn is_codex_hook_installed() -> CmdResult<bool> {
-    tauri::async_runtime::spawn_blocking(has_codex_hook_installed_internal)
+async fn is_codex_hook_installed(editor_target: Option<String>) -> CmdResult<bool> {
+    tauri::async_runtime::spawn_blocking(move || {
+        has_codex_hook_installed_internal(editor_target.as_deref())
+    })
         .await
         .map_err(|e| format!("检测 Hook 注入状态任务执行失败: {e}"))
 }
@@ -12651,7 +12945,7 @@ fn remove_mcp_server(server_id: String) -> CmdResult<McpManageView> {
 }
 
 #[tauri::command]
-fn run_post_switch_action(strategy: String) -> CmdResult<String> {
+fn run_post_switch_action(strategy: String, _editor_target: Option<String>) -> CmdResult<String> {
     run_post_switch_action_internal(&strategy)
 }
 
