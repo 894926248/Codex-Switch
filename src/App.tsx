@@ -65,7 +65,6 @@ interface DashboardData {
   appName: string;
   activeProfile?: string | null;
   current?: CurrentStatusView | null;
-  opencodeCurrent?: CurrentStatusView | null;
   currentError?: string | null;
   lastKeepaliveAt?: number | null;
   profiles: ProfileView[];
@@ -87,8 +86,6 @@ interface VsCodeStatusView {
 
 interface OpenCodeMonitorStatusView {
   authReady: boolean;
-  running: boolean;
-  processCount: number;
   logReady: boolean;
   logRecent: boolean;
   lastLogAgeMs?: number | null;
@@ -318,15 +315,13 @@ const AUTO_HOOK_VERSION_POLL_MS = 3000;
 const HOOK_LISTEN_POLL_MS = 3000;
 const HOOK_LISTEN_VSCODE_POLL_MS = 15_000;
 const LIVE_STATUS_POLL_MS = 500;
-const LIVE_STATUS_FETCH_MIN_MS = 500;
+const LIVE_STATUS_FETCH_MIN_MS = 1500;
 const LIVE_STATUS_ERROR_RETRY_MS = 250;
 const LIVE_STATUS_ERROR_RETRY_MAX_MS = 900;
 const LIVE_STATUS_BURST_WINDOW_MS = 3000;
 const LIVE_STATUS_BURST_THRESHOLD = 6;
 const LIVE_STATUS_BURST_COOLDOWN_MS = 900;
 const LIVE_STATUS_DISPLAY_STALE_MS = 4200;
-const STARTUP_LOAD_TIMEOUT_MS = 8000;
-const STARTUP_BACKGROUND_SYNC_DELAY_MS = 120;
 const DASHBOARD_WAIT_STEP_MS = 250;
 const DASHBOARD_WAIT_MAX_STEPS = 40;
 const AUTO_SEAMLESS_STORAGE_KEY = "codex-switch.autoSeamlessSwitch";
@@ -413,40 +408,6 @@ function readActiveProfileByModeStorage(): ActiveProfileByMode {
   } catch {
     return fallback;
   }
-}
-
-function withTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return task;
-  }
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const timer = window.setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      reject(new Error(`${label}超时（>${Math.floor(timeoutMs / 1000)}秒）`));
-    }, timeoutMs);
-    task.then(
-      (value) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        window.clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        window.clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -656,23 +617,12 @@ function normalizeIdentityValue(value?: string | null): string | null {
   return text || null;
 }
 
-function dashboardCurrentByMode(data: DashboardData | null | undefined, mode: AppMode): CurrentStatusView | null {
-  if (!data) {
-    return null;
-  }
-  if (mode === "opencode") {
-    return data.opencodeCurrent ?? data.current ?? null;
-  }
-  return data.current ?? null;
-}
-
-function findProfileNameForCurrent(data: DashboardData, current?: CurrentStatusView | null): string | null {
-  const targetCurrent = current ?? data.current ?? null;
-  if (!targetCurrent) {
+function findProfileNameForCurrent(data: DashboardData): string | null {
+  if (!data.current) {
     return data.activeProfile ?? null;
   }
-  const currentWorkspace = normalizeIdentityValue(targetCurrent.workspaceId);
-  const currentEmail = normalizeIdentityValue(targetCurrent.email);
+  const currentWorkspace = normalizeIdentityValue(data.current.workspaceId);
+  const currentEmail = normalizeIdentityValue(data.current.email);
 
   let exactMatch: string | null = null;
   let exactCount = 0;
@@ -1040,7 +990,6 @@ function App() {
   const liveStatusErrorStreakRef = useRef(0);
   const liveStatusErrorTimesRef = useRef<number[]>([]);
   const hookListenerVsCodeLastPollAtRef = useRef(0);
-  const activeAppModeRef = useRef<AppMode>(activeAppMode);
 
   const switchAppMode = useCallback((mode: AppMode) => {
     setActiveAppMode(mode);
@@ -1747,19 +1696,18 @@ function App() {
   }, [activeToolView, loadMcpManage, mcpManage, mcpManageLoading, mcpManageRefreshing]);
 
   const applyDashboard = useCallback((data: DashboardData, msg?: string) => {
-    const modeCurrent = dashboardCurrentByMode(data, activeAppModeRef.current);
-    const currentProfileName = findProfileNameForCurrent(data, modeCurrent);
+    const currentProfileName = findProfileNameForCurrent(data);
     const currentCheckedAt = formatLocalDateTimeFromMs(Date.now());
     const mergedProfiles =
-      currentProfileName && modeCurrent
+      currentProfileName && data.current
         ? data.profiles.map((profile) =>
             profile.name === currentProfileName
               ? {
                   ...profile,
-                  fiveHourRemainingPercent: modeCurrent?.fiveHourRemainingPercent,
-                  fiveHourResetsAt: modeCurrent?.fiveHourResetsAt,
-                  oneWeekRemainingPercent: modeCurrent?.oneWeekRemainingPercent,
-                  oneWeekResetsAt: modeCurrent?.oneWeekResetsAt,
+                  fiveHourRemainingPercent: data.current?.fiveHourRemainingPercent,
+                  fiveHourResetsAt: data.current?.fiveHourResetsAt,
+                  oneWeekRemainingPercent: data.current?.oneWeekRemainingPercent,
+                  oneWeekResetsAt: data.current?.oneWeekResetsAt,
                   lastCheckedAt: currentCheckedAt,
                 }
               : profile,
@@ -1786,21 +1734,10 @@ function App() {
   }, []);
 
   const loadDashboard = useCallback(
-    async (
-      syncCurrent = true,
-      msg?: string,
-      markInitialDone = false,
-      timeoutMs?: number,
-    ) => {
+    async (syncCurrent = true, msg?: string, markInitialDone = false) => {
       setBusy(true);
       try {
-        const mode = activeAppModeRef.current;
-        const task = invoke<DashboardData>("load_dashboard", {
-          syncCurrent,
-          mode,
-        });
-        const data =
-          mode === "opencode" ? await withTimeout(task, timeoutMs ?? 0, "加载账号") : await task;
+        const data = await invoke<DashboardData>("load_dashboard", { syncCurrent });
         applyDashboard(data, msg);
         if (data.currentError) {
           const detail = formatCurrentErrorWithProfile(data, data.currentError) ?? data.currentError;
@@ -1819,27 +1756,7 @@ function App() {
   );
 
   useEffect(() => {
-    const startupMode = activeAppModeRef.current;
-    if (startupMode !== "opencode") {
-      void loadDashboard(true, "已加载", true);
-      return;
-    }
-    let cancelled = false;
-    const bootstrap = async () => {
-      await loadDashboard(false, "已加载", true, STARTUP_LOAD_TIMEOUT_MS);
-      if (cancelled) {
-        return;
-      }
-      window.setTimeout(() => {
-        if (!cancelled) {
-          void loadDashboard(true);
-        }
-      }, STARTUP_BACKGROUND_SYNC_DELAY_MS);
-    };
-    void bootstrap();
-    return () => {
-      cancelled = true;
-    };
+    void loadDashboard(true, "已加载", true);
   }, [loadDashboard]);
 
   const refreshCurrentDashboardSilent = useCallback(async () => {
@@ -1857,10 +1774,7 @@ function App() {
     liveStatusNextFetchAtRef.current = now + LIVE_STATUS_FETCH_MIN_MS;
     try {
       // High-frequency UI polling only reads local dashboard state; backend rate-limit reads are cached.
-      const data = await invoke<DashboardData>("load_dashboard", {
-        syncCurrent: false,
-        mode: activeAppModeRef.current,
-      });
+      const data = await invoke<DashboardData>("load_dashboard", { syncCurrent: false });
       const nextSignature = buildDashboardSignature(data);
       if (nextSignature !== dashboardSignatureRef.current) {
         applyDashboard(data);
@@ -1921,10 +1835,6 @@ function App() {
   }, [blockingMessage]);
 
   useEffect(() => {
-    activeAppModeRef.current = activeAppMode;
-  }, [activeAppMode]);
-
-  useEffect(() => {
     try {
       window.localStorage.setItem(APP_MODE_STORAGE_KEY, activeAppMode);
     } catch {
@@ -1970,20 +1880,15 @@ function App() {
     );
   }, [activeAppMode, modeActiveProfileName]);
 
-  const modeCurrent = useMemo(
-    () => dashboardCurrentByMode(dashboard, activeAppMode),
-    [activeAppMode, dashboard],
-  );
-
   const currentProfileName = useMemo(
-    () => (dashboard ? findProfileNameForCurrent(dashboard, modeCurrent) : null),
-    [dashboard, modeCurrent],
+    () => (dashboard ? findProfileNameForCurrent(dashboard) : null),
+    [dashboard],
   );
 
   const getProfileCheckedAtForDisplay = useCallback(
     (profile: ProfileView): string | null | undefined => {
       const raw = profile.lastCheckedAt;
-      if (!raw || !modeCurrent || !currentProfileName || profile.name !== currentProfileName) {
+      if (!raw || !dashboard?.current || !currentProfileName || profile.name !== currentProfileName) {
         return raw;
       }
       const baseMs = parseCheckedAtToMs(raw);
@@ -1996,7 +1901,7 @@ function App() {
       }
       return formatLocalDateTimeFromMs(Math.max(baseMs, nowMs));
     },
-    [currentProfileName, modeCurrent],
+    [currentProfileName, dashboard?.current],
   );
 
   useEffect(() => {
@@ -2042,21 +1947,17 @@ function App() {
 
   const currentLine = useMemo(() => {
     const modeLabel = activeAppMode === "gpt" ? "GPT" : "OpenCode";
-    const current = modeCurrent;
     if (initialLoading) {
       return `当前${modeLabel}账号: 账号加载中...`;
     }
-    if (!modeActiveProfile && !current) {
+    if (!modeActiveProfile) {
       return `当前${modeLabel}账号: 未选择`;
     }
-    const email = current?.email || modeActiveProfile?.email || "-";
-    const workspace = current?.displayWorkspace || modeActiveProfile?.displayWorkspace || "-";
-    const fiveHourRemaining = current?.fiveHourRemainingPercent ?? modeActiveProfile?.fiveHourRemainingPercent;
-    const oneWeekRemaining = current?.oneWeekRemainingPercent ?? modeActiveProfile?.oneWeekRemainingPercent;
-    return `当前${modeLabel}账号: ${email} | 工作空间 ${workspace} | 5 小时剩余 ${pct(
-      fiveHourRemaining,
-    )} | 1 周剩余 ${pct(oneWeekRemaining)}`;
-  }, [activeAppMode, initialLoading, modeActiveProfile, modeCurrent]);
+    const email = modeActiveProfile.email || "-";
+    return `当前${modeLabel}账号: ${email} | 工作空间 ${modeActiveProfile.displayWorkspace} | 5 小时剩余 ${pct(
+      modeActiveProfile.fiveHourRemainingPercent,
+    )} | 1 周剩余 ${pct(modeActiveProfile.oneWeekRemainingPercent)}`;
+  }, [activeAppMode, initialLoading, modeActiveProfile]);
 
   const hookListenerBadge = useMemo(() => {
     if (vscodeStatus === null || hookInstalled === null) {
@@ -2077,9 +1978,6 @@ function App() {
     }
     if (!opencodeMonitorStatus.authReady) {
       return { level: "warn", text: "未监听（未登录）" };
-    }
-    if (opencodeMonitorStatus.running) {
-      return { level: "ok", text: "监听中" };
     }
     if (opencodeMonitorStatus.activityRecent) {
       return { level: "ok", text: "监听中" };
@@ -2163,10 +2061,7 @@ function App() {
       );
       const data = await invoke<DashboardData>("add_account_by_login", {});
       applyDashboard(data, finalLoginNotice ?? "添加账号完成");
-      const matched =
-        findProfileNameForCurrent(data, dashboardCurrentByMode(data, activeAppModeRef.current)) ??
-        data.activeProfile ??
-        null;
+      const matched = findProfileNameForCurrent(data) ?? data.activeProfile ?? null;
       if (
         matched &&
         data.profiles.some((profile) => profile.name === matched && supportsAppMode(profile.support, activeAppMode))
@@ -2307,8 +2202,6 @@ function App() {
         if (
           prev &&
           prev.authReady === status.authReady &&
-          prev.running === status.running &&
-          prev.processCount === status.processCount &&
           prev.logReady === status.logReady &&
           prev.logRecent === status.logRecent &&
           (prev.lastLogAgeMs ?? null) === (status.lastLogAgeMs ?? null) &&
@@ -2887,10 +2780,6 @@ function App() {
       window.clearTimeout(seamlessTimerRef.current);
       seamlessTimerRef.current = null;
     }
-    if (initialLoading) {
-      seamlessRunningRef.current = false;
-      return;
-    }
 
     if (!autoSeamlessSwitch) {
       seamlessRunningRef.current = false;
@@ -2983,17 +2872,10 @@ function App() {
       seamlessRunningRef.current = false;
       void invoke<string>("auto_switch_reset").catch(() => {});
     };
-  }, [
-    activeAppMode,
-    autoSeamlessSwitch,
-    applyDashboard,
-    initialLoading,
-    postSwitchStrategy,
-    runPostSwitchStrategy,
-  ]);
+  }, [activeAppMode, autoSeamlessSwitch, applyDashboard, postSwitchStrategy, runPostSwitchStrategy]);
 
   useEffect(() => {
-    if (initialLoading || !autoSeamlessSwitch) {
+    if (!autoSeamlessSwitch) {
       if (threadRecoverTimerRef.current) {
         window.clearTimeout(threadRecoverTimerRef.current);
         threadRecoverTimerRef.current = null;
@@ -3051,7 +2933,7 @@ function App() {
       }
       threadRecoverRunningRef.current = false;
     };
-  }, [activeAppMode, autoSeamlessSwitch, initialLoading]);
+  }, [activeAppMode, autoSeamlessSwitch]);
 
   useEffect(() => {
     autoEnabledRef.current = autoKeepalive;
