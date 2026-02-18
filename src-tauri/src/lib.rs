@@ -218,7 +218,7 @@ const AUTO_SWITCH_LIVE_QUOTA_ERROR_COOLDOWN_MS: i64 = 12_000;
 const AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS: u64 = 3;
 const AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS: u64 = 3;
 const OPENCODE_LOG_RECENT_WINDOW_MS: i64 = 120_000;
-const CURRENT_QUOTA_CACHE_FRESH_MS: i64 = 3_000;
+const CURRENT_QUOTA_CACHE_FRESH_MS: i64 = 500;
 const CURRENT_QUOTA_CACHE_MAX_AGE_MS: i64 = 30 * 60 * 1000;
 const CURRENT_QUOTA_ERROR_COOLDOWN_MS: i64 = 8_000;
 const APP_SERVER_TIMEOUT_DEFAULT_SECONDS: u64 = 14;
@@ -671,6 +671,8 @@ enum AutoSwitchMode {
 struct SessionQuotaSnapshot {
     five_hour_remaining_percent: Option<i64>,
     one_week_remaining_percent: Option<i64>,
+    five_hour_resets_at: Option<i64>,
+    one_week_resets_at: Option<i64>,
     updated_at_ms: Option<i64>,
 }
 
@@ -7770,15 +7772,7 @@ fn load_live_opencode_current_status(
     } else {
         APP_SERVER_TIMEOUT_POLL_SECONDS
     };
-    let quota_result =
-        fetch_quota_from_live_opencode_auth_with_timeout(quota_timeout_seconds).or_else(|primary_err| {
-        fetch_quota_from_opencode_profile_snapshot_with_timeout(
-            store,
-            live_workspace_id.as_deref(),
-            quota_timeout_seconds,
-        )
-            .map_err(|fallback_err| format!("{primary_err}；快照回退失败: {fallback_err}"))
-    });
+    let quota_result = fetch_quota_from_live_opencode_auth_with_timeout(quota_timeout_seconds);
 
     match quota_result {
         Ok(quota) => {
@@ -7812,12 +7806,16 @@ fn load_dashboard_internal_for_mode(
     if !need_gpt_current {
         return Ok(build_dashboard(&store, current, opencode_current, current_error));
     }
-    let codex_home = codex_home()?;
+    let codex_home_opt = codex_home().ok();
     let cached_quota = cached_current_quota_snapshot(now_ms).and_then(|(quota, age_ms)| {
-        if cached_quota_matches_live_workspace(&codex_home, &quota) {
-            Some((quota, age_ms))
+        if let Some(codex_home) = codex_home_opt.as_ref() {
+            if cached_quota_matches_live_workspace(codex_home, &quota) {
+                Some((quota, age_ms))
+            } else {
+                None
+            }
         } else {
-            None
+            Some((quota, age_ms))
         }
     });
 
@@ -7832,40 +7830,18 @@ fn load_dashboard_internal_for_mode(
             return Ok(build_dashboard(&store, current, opencode_current, current_error));
         }
     }
-    if !sync_current {
-        if let Some(quota) = quota_from_rollout_snapshot(&store) {
-            update_current_quota_runtime_cache(&quota, now_ms);
-            current = Some(current_status_from_quota(&store, &quota));
-            return Ok(build_dashboard(&store, current, opencode_current, current_error));
-        }
+    if let Some(quota) = quota_from_rollout_snapshot(&store) {
+        update_current_quota_runtime_cache(&quota, now_ms);
+        current = Some(current_status_from_quota(&store, &quota));
+        return Ok(build_dashboard(&store, current, opencode_current, current_error));
     }
-    // Prefer live ~/.codex; fallback to recent cache when host/limit endpoint transiently fails.
-    match fetch_quota_from_codex_home(&codex_home, false) {
-        Ok(quota) => {
-            update_current_quota_runtime_cache(&quota, now_ms);
-            if sync_current {
-                auto_sync_current_account_to_list(&mut store, &quota)?;
-                save_store(&store)?;
-            }
-            current = Some(current_status_from_quota(&store, &quota));
-        }
-        Err(err) => {
-            mark_current_quota_runtime_error(&err, now_ms);
-            if let Some(quota) = quota_from_rollout_snapshot(&store) {
-                update_current_quota_runtime_cache(&quota, now_ms);
-                current = Some(current_status_from_quota(&store, &quota));
-            } else if let Some((quota, age_ms)) = cached_quota {
-                current = Some(current_status_from_quota(&store, &quota));
-                if sync_current && age_ms > CURRENT_QUOTA_CACHE_FRESH_MS {
-                    current_error = Some(format!(
-                        "默认环境读取失败: {err}（已回退到缓存，{}秒前）",
-                        age_ms / 1000
-                    ));
-                }
-            } else {
-                current_error = Some(format!("默认环境读取失败: {err}"));
-            }
-        }
+    if let Some(quota) = quota_from_active_profile_record(&store) {
+        current = Some(current_status_from_quota(&store, &quota));
+        return Ok(build_dashboard(&store, current, opencode_current, current_error));
+    }
+    if let Some((quota, _)) = cached_quota {
+        current = Some(current_status_from_quota(&store, &quota));
+        return Ok(build_dashboard(&store, current, opencode_current, current_error));
     }
     Ok(build_dashboard(&store, current, opencode_current, current_error))
 }
@@ -9468,7 +9444,7 @@ fn read_num_from_map(map: &Map<String, Value>, keys: &[&str]) -> Option<i64> {
     None
 }
 
-fn parse_rate_window_remaining(window: &Map<String, Value>) -> Option<(i64, i64)> {
+fn parse_rate_window_remaining(window: &Map<String, Value>) -> Option<(i64, i64, Option<i64>)> {
     let minutes = read_num_from_map(
         window,
         &["window_minutes", "windowMinutes", "windowDurationMins"],
@@ -9478,33 +9454,34 @@ fn parse_rate_window_remaining(window: &Map<String, Value>) -> Option<(i64, i64)
             read_num_from_map(window, &["used_percent", "usedPercent"])
                 .map(|used| (100 - used).clamp(0, 100))
         })?;
-    Some((minutes, remaining.clamp(0, 100)))
+    let resets_at = read_num_from_map(window, &["resets_at", "resetsAt", "window_end", "windowEnd"]);
+    Some((minutes, remaining.clamp(0, 100), resets_at))
 }
 
 fn pick_remaining_window(
-    windows: &[(i64, i64)],
+    windows: &[(i64, i64, Option<i64>)],
     target_minutes: i64,
     tolerance_minutes: i64,
-) -> Option<i64> {
+) -> Option<(i64, Option<i64>)> {
     windows
         .iter()
-        .filter_map(|(mins, remain)| {
+        .filter_map(|(mins, remain, resets_at)| {
             let diff = (*mins - target_minutes).abs();
             if diff <= tolerance_minutes {
-                Some((diff, *remain))
+                Some((diff, *remain, *resets_at))
             } else {
                 None
             }
         })
-        .min_by_key(|(diff, _)| *diff)
-        .map(|(_, remain)| remain)
+        .min_by_key(|(diff, _, _)| *diff)
+        .map(|(_, remain, resets_at)| (remain, resets_at))
 }
 
 fn merge_runtime_quota_from_rate_limits(
     snapshot: &mut SessionQuotaSnapshot,
     rate_limits: &Map<String, Value>,
 ) {
-    let mut windows: Vec<(i64, i64)> = Vec::new();
+    let mut windows: Vec<(i64, i64, Option<i64>)> = Vec::new();
     for key in ["primary", "secondary"] {
         if let Some(obj) = rate_limits.get(key).and_then(Value::as_object) {
             if let Some(parsed) = parse_rate_window_remaining(obj) {
@@ -9516,12 +9493,14 @@ fn merge_runtime_quota_from_rate_limits(
     let five = pick_remaining_window(&windows, 300, 30);
     let week = pick_remaining_window(&windows, 10080, 12 * 60);
     let mut changed = false;
-    if let Some(v) = five {
-        snapshot.five_hour_remaining_percent = Some(v);
+    if let Some((remain, resets_at)) = five {
+        snapshot.five_hour_remaining_percent = Some(remain);
+        snapshot.five_hour_resets_at = resets_at;
         changed = true;
     }
-    if let Some(v) = week {
-        snapshot.one_week_remaining_percent = Some(v);
+    if let Some((remain, resets_at)) = week {
+        snapshot.one_week_remaining_percent = Some(remain);
+        snapshot.one_week_resets_at = resets_at;
         changed = true;
     }
     if changed {
@@ -9696,13 +9675,13 @@ fn quota_from_rollout_snapshot(store: &StoreData) -> Option<AccountQuota> {
         window_minutes: Some(300),
         used_percent: Some((100 - remain).clamp(0, 100)),
         remaining_percent: Some(remain.clamp(0, 100)),
-        resets_at: None,
+        resets_at: snapshot.five_hour_resets_at,
     });
     let week = snapshot.one_week_remaining_percent.map(|remain| WindowQuota {
         window_minutes: Some(10080),
         used_percent: Some((100 - remain).clamp(0, 100)),
         remaining_percent: Some(remain.clamp(0, 100)),
-        resets_at: None,
+        resets_at: snapshot.one_week_resets_at,
     });
 
     Some(AccountQuota {
@@ -9712,6 +9691,50 @@ fn quota_from_rollout_snapshot(store: &StoreData) -> Option<AccountQuota> {
         plan_type: None,
         five_hour: five,
         one_week: week,
+    })
+}
+
+fn quota_from_active_profile_record(store: &StoreData) -> Option<AccountQuota> {
+    let active_name = store.active_profile.as_ref()?;
+    let record = store.profiles.get(active_name)?.as_object()?;
+    let (five_pct, _, week_pct, _) = quota_fields_from_record(record);
+    let email = record
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    let workspace_name = record
+        .get("workspace_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    let workspace_id = record
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    let five_hour = five_pct.map(|remain| WindowQuota {
+        window_minutes: Some(300),
+        used_percent: Some((100 - remain).clamp(0, 100)),
+        remaining_percent: Some(remain.clamp(0, 100)),
+        resets_at: None,
+    });
+    let one_week = week_pct.map(|remain| WindowQuota {
+        window_minutes: Some(10080),
+        used_percent: Some((100 - remain).clamp(0, 100)),
+        remaining_percent: Some(remain.clamp(0, 100)),
+        resets_at: None,
+    });
+    Some(AccountQuota {
+        email,
+        workspace_name,
+        workspace_id,
+        plan_type: None,
+        five_hour,
+        one_week,
     })
 }
 
@@ -10731,6 +10754,10 @@ fn update_session_quota_snapshot_from_account(
         quota.five_hour.as_ref().and_then(|v| v.remaining_percent);
     runtime.session.quota.one_week_remaining_percent =
         quota.one_week.as_ref().and_then(|v| v.remaining_percent);
+    runtime.session.quota.five_hour_resets_at =
+        quota.five_hour.as_ref().and_then(|v| v.resets_at);
+    runtime.session.quota.one_week_resets_at =
+        quota.one_week.as_ref().and_then(|v| v.resets_at);
     runtime.session.quota.updated_at_ms = Some(now_ms);
 }
 
@@ -10739,22 +10766,11 @@ fn fetch_live_quota_for_trigger(
     store: &StoreData,
 ) -> CmdResult<AccountQuota> {
     match mode {
-        AutoSwitchMode::Gpt => fetch_quota_from_codex_home_with_timeout(
-            &codex_home()?,
-            false,
-            AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS,
-        ),
+        AutoSwitchMode::Gpt => quota_from_rollout_snapshot(store)
+            .or_else(|| quota_from_active_profile_record(store))
+            .ok_or_else(|| "未读取到 GPT 本地会话额度快照。".to_string()),
         AutoSwitchMode::OpenCode => {
-            let live_workspace_id = live_opencode_workspace_id_internal();
             fetch_quota_from_live_opencode_auth_with_timeout(AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS)
-                .or_else(|primary_err| {
-                    fetch_quota_from_opencode_profile_snapshot_with_timeout(
-                        store,
-                        live_workspace_id.as_deref(),
-                        AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS,
-                    )
-                    .map_err(|fallback_err| format!("{primary_err}；快照回退失败: {fallback_err}"))
-                })
         }
     }
 }
