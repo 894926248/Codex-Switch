@@ -909,13 +909,24 @@ function App() {
       const data = await invoke<SkillsCatalogView>("load_skills_catalog");
       setSkillsCatalog(recomputeSkillsCatalog(data));
       setSkillsError(null);
+      return true;
     } catch (err) {
       setSkillsError(`读取 Skills 失败: ${String(err)}`);
+      return false;
     } finally {
       setSkillsLoading(false);
       setSkillsRefreshing(false);
     }
   }, []);
+
+  const onRefreshSkillsCatalog = useCallback(async () => {
+    if (skillsLoading || skillsRefreshing) {
+      return;
+    }
+    setStatusText("正在刷新 Skills...");
+    const ok = await loadSkillsCatalog(false);
+    setStatusText(ok ? "已刷新 Skills" : "刷新 Skills 失败");
+  }, [skillsLoading, skillsRefreshing, loadSkillsCatalog]);
 
   const loadSkillsDiscovery = useCallback(async (showLoading: boolean, syncRemote: boolean) => {
     if (showLoading) {
@@ -3279,10 +3290,12 @@ function App() {
                 type="button"
                 className="skills-head-action"
                 disabled={skillsLoading || skillsRefreshing}
-                onClick={() => void loadSkillsCatalog(false)}
+                onClick={() => void onRefreshSkillsCatalog()}
+                title={skillsRefreshing ? "Skills 刷新中..." : "刷新 Skills"}
+                aria-label={skillsRefreshing ? "Skills 刷新中" : "刷新 Skills"}
               >
-                <RefreshCw className="skills-head-action-icon" />
-                刷新
+                <RefreshCw className={`skills-head-action-icon ${skillsRefreshing ? "icon-spin" : ""}`} />
+                {skillsRefreshing ? "刷新中..." : "刷新"}
               </button>
               <button type="button" className="skills-head-action" onClick={() => void onSkillsInstallFromZip()}>
                 <FileArchive className="skills-head-action-icon" />
