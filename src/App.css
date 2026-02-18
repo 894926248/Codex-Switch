@@ -1583,13 +1583,10 @@ button {
 }
 
 .mcp-create-bottom-bar {
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
-  margin-top: auto;
-  padding: 10px 0 0;
-  border-top: 1px solid #d8e2e8;
-  background: var(--bg);
+  margin-top: 0;
+  padding: 0;
+  border-top: none;
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: flex-end;
