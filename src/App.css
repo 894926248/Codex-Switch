@@ -1425,6 +1425,62 @@ button {
   padding: 8px 10px;
 }
 
+.mcp-add-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2080;
+  background: rgba(27, 43, 51, 0.28);
+  backdrop-filter: blur(1px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.mcp-add-window {
+  width: min(860px, 96vw);
+  max-height: min(86vh, 820px);
+  overflow: auto;
+  box-shadow: 0 22px 52px rgba(31, 58, 72, 0.26);
+}
+
+.mcp-add-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.mcp-add-window-header h2 {
+  margin: 0;
+  font-size: 31px;
+  line-height: 1.2;
+  color: #1f3542;
+}
+
+.mcp-add-window-close {
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid #ccd9e0;
+  background: #ffffff;
+  color: #2b4653;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.16s ease,
+    border-color 0.16s ease,
+    transform 0.16s ease;
+}
+
+.mcp-add-window-close:hover {
+  border-color: #b7ccd7;
+  background: #f9fcff;
+  transform: translateY(-1px);
+}
+
 .mcp-inline-empty {
   display: flex;
   flex-direction: column;
@@ -2439,6 +2495,21 @@ button {
 
   .settings-btn {
     width: 100%;
+  }
+
+  .mcp-add-overlay {
+    padding: 10px;
+    align-items: flex-end;
+  }
+
+  .mcp-add-window {
+    width: 100%;
+    max-height: 92vh;
+    border-radius: 12px 12px 0 0;
+  }
+
+  .mcp-add-window-header h2 {
+    font-size: 24px;
   }
 
   .top-bar {

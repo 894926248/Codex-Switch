@@ -1019,6 +1019,16 @@ function App() {
     setMcpFormError(null);
   }, []);
 
+  const openMcpAddDialog = useCallback(() => {
+    resetMcpAddForm();
+    setMcpAddOpen(true);
+  }, [resetMcpAddForm]);
+
+  const closeMcpAddDialog = useCallback(() => {
+    setMcpAddOpen(false);
+    setMcpFormError(null);
+  }, []);
+
   const parseMcpArgsInput = useCallback((raw: string): string[] => {
     const text = raw.trim();
     if (!text) {
@@ -3653,130 +3663,17 @@ function App() {
                 <button
                   type="button"
                   className="skills-head-action"
-                  onClick={() => {
-                    if (mcpAddOpen) {
-                      setMcpAddOpen(false);
-                      setMcpFormError(null);
-                      return;
-                    }
-                    resetMcpAddForm();
-                    setMcpAddOpen(true);
-                  }}
+                  disabled={mcpManageRefreshing}
+                  onClick={() => openMcpAddDialog()}
                 >
                   <Plus className="skills-head-action-icon" />
-                  {mcpAddOpen ? "取消添加" : "添加MCP"}
+                  添加MCP
                 </button>
               </div>
             </section>
 
             <section className="skills-inline-summary">{mcpSummaryText}</section>
           </div>
-
-          {mcpAddOpen ? (
-            <section className="skill-repo-form-panel mcp-form-panel">
-              <h2>添加 MCP 服务器</h2>
-              <label className="skill-repo-form-label">
-                <span>MCP ID</span>
-                <input
-                  type="text"
-                  value={mcpFormId}
-                  onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormId(event.target.value)}
-                  placeholder="例如: context7"
-                />
-              </label>
-              <label className="skill-repo-form-label">
-                <span>类型</span>
-                <div className="skills-discovery-select-wrap mcp-form-select-wrap">
-                  <select
-                    value={mcpFormType}
-                    onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                      setMcpFormType(event.target.value as "stdio" | "sse" | "http")
-                    }
-                  >
-                    <option value="stdio">stdio (本地命令)</option>
-                    <option value="sse">sse (远程)</option>
-                    <option value="http">http (远程)</option>
-                  </select>
-                  <ChevronDown className="skills-discovery-select-icon" />
-                </div>
-              </label>
-
-              {mcpFormType === "stdio" ? (
-                <>
-                  <label className="skill-repo-form-label">
-                    <span>command</span>
-                    <input
-                      type="text"
-                      value={mcpFormCommand}
-                      onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormCommand(event.target.value)}
-                      placeholder="例如: npx"
-                    />
-                  </label>
-                  <label className="skill-repo-form-label">
-                    <span>args (空格分隔，或 JSON 数组)</span>
-                    <input
-                      type="text"
-                      value={mcpFormArgs}
-                      onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormArgs(event.target.value)}
-                      placeholder='例如: -y @upstash/context7-mcp 或 ["-y","pkg"]'
-                    />
-                  </label>
-                  <label className="skill-repo-form-label">
-                    <span>env (JSON 对象，可选)</span>
-                    <textarea
-                      value={mcpFormEnv}
-                      onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setMcpFormEnv(event.target.value)}
-                      placeholder='例如: {"API_KEY":"xxx"}'
-                      rows={4}
-                    />
-                  </label>
-                </>
-              ) : (
-                <label className="skill-repo-form-label">
-                  <span>URL</span>
-                  <input
-                    type="text"
-                    value={mcpFormUrl}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormUrl(event.target.value)}
-                    placeholder="例如: https://mcp.context7.com/mcp"
-                  />
-                </label>
-              )}
-
-              <div className="mcp-form-targets">
-                <label className="mcp-form-target">
-                  <input
-                    type="checkbox"
-                    checked={mcpFormCodexEnabled}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormCodexEnabled(event.target.checked)}
-                  />
-                  <img src={openaiLogo} alt="" aria-hidden className="skill-target-icon" />
-                  <span>Codex</span>
-                </label>
-                <label className="mcp-form-target">
-                  <input
-                    type="checkbox"
-                    checked={mcpFormOpencodeEnabled}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormOpencodeEnabled(event.target.checked)}
-                  />
-                  <img src={opencodeLogo} alt="" aria-hidden className="skill-target-icon" />
-                  <span>OpenCode</span>
-                </label>
-              </div>
-
-              {mcpFormError ? <div className="mcp-form-error">{mcpFormError}</div> : null}
-
-              <button
-                type="button"
-                className="skill-repo-add-btn"
-                disabled={!!mcpBusyIds.__add__}
-                onClick={() => void onSubmitMcpAdd()}
-              >
-                <Plus className="skill-repo-add-icon" />
-                {mcpBusyIds.__add__ ? "添加中..." : "添加MCP"}
-              </button>
-            </section>
-          ) : null}
 
           {mcpManageError ? <section className="skills-inline-error">{mcpManageError}</section> : null}
 
@@ -3878,6 +3775,125 @@ function App() {
           </section>
         </main>
       )}
+
+      {activeToolView === "mcp" && mcpAddOpen ? (
+        <div
+          className="mcp-add-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="添加 MCP 服务器"
+          onClick={() => closeMcpAddDialog()}
+        >
+          <section className="skill-repo-form-panel mcp-form-panel mcp-add-window" onClick={(event) => event.stopPropagation()}>
+            <header className="mcp-add-window-header">
+              <h2>添加 MCP 服务器</h2>
+              <button type="button" className="mcp-add-window-close" onClick={() => closeMcpAddDialog()}>
+                关闭
+              </button>
+            </header>
+            <label className="skill-repo-form-label">
+              <span>MCP ID</span>
+              <input
+                type="text"
+                value={mcpFormId}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormId(event.target.value)}
+                placeholder="例如: context7"
+              />
+            </label>
+            <label className="skill-repo-form-label">
+              <span>类型</span>
+              <div className="skills-discovery-select-wrap mcp-form-select-wrap">
+                <select
+                  value={mcpFormType}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    setMcpFormType(event.target.value as "stdio" | "sse" | "http")
+                  }
+                >
+                  <option value="stdio">stdio (本地命令)</option>
+                  <option value="sse">sse (远程)</option>
+                  <option value="http">http (远程)</option>
+                </select>
+                <ChevronDown className="skills-discovery-select-icon" />
+              </div>
+            </label>
+
+            {mcpFormType === "stdio" ? (
+              <>
+                <label className="skill-repo-form-label">
+                  <span>command</span>
+                  <input
+                    type="text"
+                    value={mcpFormCommand}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormCommand(event.target.value)}
+                    placeholder="例如: npx"
+                  />
+                </label>
+                <label className="skill-repo-form-label">
+                  <span>args (空格分隔，或 JSON 数组)</span>
+                  <input
+                    type="text"
+                    value={mcpFormArgs}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormArgs(event.target.value)}
+                    placeholder='例如: -y @upstash/context7-mcp 或 ["-y","pkg"]'
+                  />
+                </label>
+                <label className="skill-repo-form-label">
+                  <span>env (JSON 对象，可选)</span>
+                  <textarea
+                    value={mcpFormEnv}
+                    onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setMcpFormEnv(event.target.value)}
+                    placeholder='例如: {"API_KEY":"xxx"}'
+                    rows={4}
+                  />
+                </label>
+              </>
+            ) : (
+              <label className="skill-repo-form-label">
+                <span>URL</span>
+                <input
+                  type="text"
+                  value={mcpFormUrl}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormUrl(event.target.value)}
+                  placeholder="例如: https://mcp.context7.com/mcp"
+                />
+              </label>
+            )}
+
+            <div className="mcp-form-targets">
+              <label className="mcp-form-target">
+                <input
+                  type="checkbox"
+                  checked={mcpFormCodexEnabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormCodexEnabled(event.target.checked)}
+                />
+                <img src={openaiLogo} alt="" aria-hidden className="skill-target-icon" />
+                <span>Codex</span>
+              </label>
+              <label className="mcp-form-target">
+                <input
+                  type="checkbox"
+                  checked={mcpFormOpencodeEnabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormOpencodeEnabled(event.target.checked)}
+                />
+                <img src={opencodeLogo} alt="" aria-hidden className="skill-target-icon" />
+                <span>OpenCode</span>
+              </label>
+            </div>
+
+            {mcpFormError ? <div className="mcp-form-error">{mcpFormError}</div> : null}
+
+            <button
+              type="button"
+              className="skill-repo-add-btn"
+              disabled={!!mcpBusyIds.__add__}
+              onClick={() => void onSubmitMcpAdd()}
+            >
+              <Plus className="skill-repo-add-icon" />
+              {mcpBusyIds.__add__ ? "添加中..." : "添加MCP"}
+            </button>
+          </section>
+        </div>
+      ) : null}
 
       <footer className="status-bar">
         <span className="status-listener-group">
