@@ -2823,6 +2823,10 @@ function App() {
       window.clearTimeout(seamlessTimerRef.current);
       seamlessTimerRef.current = null;
     }
+    if (initialLoading) {
+      seamlessRunningRef.current = false;
+      return;
+    }
 
     if (!autoSeamlessSwitch) {
       seamlessRunningRef.current = false;
@@ -2915,10 +2919,17 @@ function App() {
       seamlessRunningRef.current = false;
       void invoke<string>("auto_switch_reset").catch(() => {});
     };
-  }, [activeAppMode, autoSeamlessSwitch, applyDashboard, postSwitchStrategy, runPostSwitchStrategy]);
+  }, [
+    activeAppMode,
+    autoSeamlessSwitch,
+    applyDashboard,
+    initialLoading,
+    postSwitchStrategy,
+    runPostSwitchStrategy,
+  ]);
 
   useEffect(() => {
-    if (!autoSeamlessSwitch) {
+    if (initialLoading || !autoSeamlessSwitch) {
       if (threadRecoverTimerRef.current) {
         window.clearTimeout(threadRecoverTimerRef.current);
         threadRecoverTimerRef.current = null;
@@ -2976,7 +2987,7 @@ function App() {
       }
       threadRecoverRunningRef.current = false;
     };
-  }, [activeAppMode, autoSeamlessSwitch]);
+  }, [activeAppMode, autoSeamlessSwitch, initialLoading]);
 
   useEffect(() => {
     autoEnabledRef.current = autoKeepalive;

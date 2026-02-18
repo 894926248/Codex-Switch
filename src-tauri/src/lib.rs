@@ -7794,12 +7794,24 @@ fn load_live_opencode_current_status(
     }
 }
 
-fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
+fn load_dashboard_internal_for_mode(
+    sync_current: bool,
+    mode: Option<AutoSwitchMode>,
+) -> CmdResult<DashboardData> {
     let mut store = load_store()?;
     let now_ms = now_ts_ms();
+    let need_gpt_current = !matches!(mode, Some(AutoSwitchMode::OpenCode));
+    let need_opencode_current = !matches!(mode, Some(AutoSwitchMode::Gpt));
     let mut current = None;
-    let opencode_current = load_live_opencode_current_status(&store, sync_current, now_ms);
+    let opencode_current = if need_opencode_current {
+        load_live_opencode_current_status(&store, sync_current, now_ms)
+    } else {
+        None
+    };
     let mut current_error = None;
+    if !need_gpt_current {
+        return Ok(build_dashboard(&store, current, opencode_current, current_error));
+    }
     let codex_home = codex_home()?;
     let cached_quota = cached_current_quota_snapshot(now_ms).and_then(|(quota, age_ms)| {
         if cached_quota_matches_live_workspace(&codex_home, &quota) {
@@ -7861,6 +7873,10 @@ fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
         }
     }
     Ok(build_dashboard(&store, current, opencode_current, current_error))
+}
+
+fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
+    load_dashboard_internal_for_mode(sync_current, None)
 }
 
 fn save_current_profile_internal(profile_name: &str) -> CmdResult<DashboardData> {
@@ -11327,7 +11343,10 @@ fn fmt_reset(ts: Option<i64>) -> String {
 #[tauri::command]
 async fn load_dashboard(sync_current: Option<bool>, _mode: Option<String>) -> CmdResult<DashboardData> {
     let sync_current = sync_current.unwrap_or(true);
-    tauri::async_runtime::spawn_blocking(move || load_dashboard_internal(sync_current))
+    let mode = _mode
+        .as_deref()
+        .map(|value| parse_auto_switch_mode(Some(value)));
+    tauri::async_runtime::spawn_blocking(move || load_dashboard_internal_for_mode(sync_current, mode))
         .await
         .map_err(|e| format!("加载看板任务执行失败: {e}"))?
 }
