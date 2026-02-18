@@ -7526,9 +7526,9 @@ fn auto_sync_current_account_to_list(
 }
 
 fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
-    let store = load_store()?;
+    let mut store = load_store()?;
     let mut current = None;
-    let current_error = None;
+    let mut current_error = None;
     let codex_home = codex_home()?;
     let now_ms = now_ts_ms();
     let cached_quota = cached_current_quota_snapshot(now_ms).and_then(|(quota, age_ms)| {
@@ -7551,18 +7551,31 @@ fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
         }
     }
 
-    // VSCode/GPT current quota is sourced from local rollout session files only.
-    if let Some(quota) = quota_from_rollout_snapshot(&store) {
-        update_current_quota_runtime_cache(&quota, now_ms);
-        current = Some(current_status_from_quota(&store, &quota));
-        return Ok(build_dashboard(&store, current, current_error));
+    // Prefer live ~/.codex; fallback to recent cache when host/limit endpoint transiently fails.
+    match fetch_quota_from_codex_home(&codex_home, false) {
+        Ok(quota) => {
+            update_current_quota_runtime_cache(&quota, now_ms);
+            if sync_current {
+                auto_sync_current_account_to_list(&mut store, &quota)?;
+                save_store(&store)?;
+            }
+            current = Some(current_status_from_quota(&store, &quota));
+        }
+        Err(err) => {
+            mark_current_quota_runtime_error(&err, now_ms);
+            if let Some((quota, age_ms)) = cached_quota {
+                current = Some(current_status_from_quota(&store, &quota));
+                if sync_current && age_ms > CURRENT_QUOTA_CACHE_FRESH_MS {
+                    current_error = Some(format!(
+                        "默认环境读取失败: {err}（已回退到缓存，{}秒前）",
+                        age_ms / 1000
+                    ));
+                }
+            } else {
+                current_error = Some(format!("默认环境读取失败: {err}"));
+            }
+        }
     }
-
-    if let Some((quota, _)) = cached_quota {
-        current = Some(current_status_from_quota(&store, &quota));
-        return Ok(build_dashboard(&store, current, current_error));
-    }
-
     Ok(build_dashboard(&store, current, current_error))
 }
 
@@ -9303,109 +9316,6 @@ fn process_session_log_line(line: &str, session: &mut SessionTailState) {
         return;
     };
     process_event_msg_payload(payload, session);
-}
-
-fn read_latest_rollout_session_quota_snapshot() -> Option<SessionQuotaSnapshot> {
-    let path = find_latest_rollout_session_file()?;
-    let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let mut snapshot = SessionQuotaSnapshot::default();
-    for line in reader.lines().map_while(Result::ok) {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if value.get("type").and_then(Value::as_str) != Some("event_msg") {
-            continue;
-        }
-        let Some(payload) = value.get("payload").and_then(Value::as_object) else {
-            continue;
-        };
-        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
-            continue;
-        }
-        if let Some(rate_limits) = payload.get("rate_limits").and_then(Value::as_object) {
-            merge_runtime_quota_from_rate_limits(&mut snapshot, rate_limits);
-        }
-    }
-    if snapshot.five_hour_remaining_percent.is_none() && snapshot.one_week_remaining_percent.is_none() {
-        return None;
-    }
-    Some(snapshot)
-}
-
-fn quota_from_rollout_snapshot(store: &StoreData) -> Option<AccountQuota> {
-    let snapshot = read_latest_rollout_session_quota_snapshot()?;
-    let auth_file = codex_home().ok()?.join(AUTH_FILE_NAME);
-    let (mut workspace_name, mut workspace_id) = read_workspace_info_from_auth_file(&auth_file);
-
-    let matched_name = find_profile_name_by_identity_prefer_existing(
-        store,
-        workspace_id.as_deref(),
-        None,
-    )
-    .or_else(|| store.active_profile.clone());
-
-    let mut email: Option<String> = None;
-    let mut plan_type: Option<String> = None;
-    let mut five_reset: Option<i64> = None;
-    let mut week_reset: Option<i64> = None;
-    let mut five_from_record: Option<i64> = None;
-    let mut week_from_record: Option<i64> = None;
-
-    if let Some(name) = matched_name {
-        if let Some(record) = store.profiles.get(&name).and_then(Value::as_object) {
-            if workspace_name.as_deref().unwrap_or("").trim().is_empty() {
-                workspace_name = record
-                    .get("workspace_name")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string);
-            }
-            if workspace_id.as_deref().unwrap_or("").trim().is_empty() {
-                workspace_id = read_workspace_id_from_record_or_auth(&name, record);
-            }
-            email = read_email_from_record(record);
-            plan_type = record
-                .get("plan_type")
-                .and_then(Value::as_str)
-                .map(ToString::to_string);
-            let (five_pct, five_resets_at, week_pct, week_resets_at) = quota_fields_from_record(record);
-            five_from_record = five_pct;
-            week_from_record = week_pct;
-            five_reset = five_resets_at;
-            week_reset = week_resets_at;
-        }
-    }
-
-    let five_remaining = snapshot.five_hour_remaining_percent.or(five_from_record);
-    let week_remaining = snapshot.one_week_remaining_percent.or(week_from_record);
-    if five_remaining.is_none() && week_remaining.is_none() {
-        return None;
-    }
-
-    let five_hour = five_remaining.map(|remaining| WindowQuota {
-        window_minutes: Some(300),
-        used_percent: Some((100 - remaining).clamp(0, 100)),
-        remaining_percent: Some(remaining),
-        resets_at: five_reset,
-    });
-    let one_week = week_remaining.map(|remaining| WindowQuota {
-        window_minutes: Some(10080),
-        used_percent: Some((100 - remaining).clamp(0, 100)),
-        remaining_percent: Some(remaining),
-        resets_at: week_reset,
-    });
-
-    Some(AccountQuota {
-        email,
-        workspace_name,
-        workspace_id,
-        plan_type,
-        five_hour,
-        one_week,
-    })
 }
 
 fn collect_rollout_session_files(root: &Path, out: &mut Vec<PathBuf>) {
