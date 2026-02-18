@@ -4017,13 +4017,24 @@ function App() {
           <section className="skill-repo-form-panel mcp-create-card">
             <div className="mcp-json-header">
               <h2>完整的 JSON 配置</h2>
-              <button
-                type="button"
-                className="mcp-json-guide-btn"
-                onClick={() => setStatusText("当前已使用表单自动生成 JSON 配置。")}
-              >
-                配置向导
-              </button>
+              <div className="mcp-json-actions">
+                <button
+                  type="button"
+                  className="mcp-json-guide-btn"
+                  onClick={() => setStatusText("当前已使用表单自动生成 JSON 配置。")}
+                >
+                  配置向导
+                </button>
+                <button
+                  type="button"
+                  className="skill-repo-add-btn mcp-inline-add-btn"
+                  disabled={!!mcpBusyIds.__add__}
+                  onClick={() => void onSubmitMcpAdd()}
+                >
+                  <Plus className="skill-repo-add-icon" />
+                  {mcpBusyIds.__add__ ? "添加中..." : "添加"}
+                </button>
+              </div>
             </div>
             <textarea
               className="mcp-json-editor"
@@ -4036,18 +4047,6 @@ function App() {
             <button type="button" className="mcp-json-format-btn" onClick={onFormatMcpConfig}>
               <Wrench className="mcp-json-format-icon" />
               格式化
-            </button>
-          </section>
-
-          <section className="mcp-create-bottom-bar">
-            <button
-              type="button"
-              className="skill-repo-add-btn"
-              disabled={!!mcpBusyIds.__add__}
-              onClick={() => void onSubmitMcpAdd()}
-            >
-              <Plus className="skill-repo-add-icon" />
-              {mcpBusyIds.__add__ ? "添加中..." : "添加"}
             </button>
           </section>
         </main>

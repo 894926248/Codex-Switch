@@ -1522,6 +1522,12 @@ button {
   margin: 0;
 }
 
+.mcp-json-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .mcp-json-guide-btn {
   border: none;
   background: transparent;
@@ -1582,15 +1588,10 @@ button {
   height: 14px;
 }
 
-.mcp-create-bottom-bar {
+.mcp-inline-add-btn {
   margin-top: 0;
-  padding: 0;
-  border-top: none;
-  background: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+  height: 34px;
+  padding: 0 12px;
 }
 
 .mcp-inline-empty {
@@ -2625,14 +2626,13 @@ button {
     gap: 6px;
   }
 
-  .mcp-create-bottom-bar {
-    padding-top: 8px;
-    gap: 8px;
+  .mcp-json-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 
-  .mcp-create-bottom-bar .skill-repo-add-btn {
-    flex: 1;
-    justify-content: center;
+  .mcp-inline-add-btn {
+    height: 36px;
   }
 
   .top-bar {
