@@ -114,6 +114,8 @@ interface AppServerLogPayload {
   ts?: string;
 }
 
+const APP_SERVER_CONSOLE_LOG_ENABLED = false;
+
 interface BackupExportResult {
   archivePath: string;
   fileCount: number;
@@ -717,6 +719,26 @@ function findProfileNameForCurrent(
   return fallbackProfileName ?? data.activeProfile ?? null;
 }
 
+function profileMatchesCurrentIdentity(profile: ProfileView, current: CurrentStatusView): boolean {
+  const currentWorkspace = normalizeIdentityValue(current.workspaceId);
+  const currentWorkspaceName = normalizeIdentityValue(current.workspaceName ?? current.displayWorkspace);
+  const currentEmail = normalizeIdentityValue(current.email);
+  const profileWorkspace = normalizeIdentityValue(profile.workspaceId);
+  const profileWorkspaceName = normalizeIdentityValue(profile.workspaceName ?? profile.displayWorkspace);
+  const profileEmail = normalizeIdentityValue(profile.email);
+
+  if (currentWorkspace && profileWorkspace === currentWorkspace) {
+    if (!currentEmail || !profileEmail) {
+      return true;
+    }
+    return profileEmail === currentEmail;
+  }
+  if (currentWorkspaceName && currentEmail && profileWorkspaceName === currentWorkspaceName && profileEmail === currentEmail) {
+    return true;
+  }
+  return false;
+}
+
 function buildDashboardSignature(data: DashboardData): string {
   return JSON.stringify(data);
 }
@@ -1127,6 +1149,9 @@ function App() {
   );
 
   useEffect(() => {
+    if (!APP_SERVER_CONSOLE_LOG_ENABLED) {
+      return;
+    }
     let unlisten: (() => void) | null = null;
     const bind = async () => {
       try {
@@ -1889,23 +1914,21 @@ function App() {
   const applyDashboard = useCallback((data: DashboardData, msg?: string) => {
     const currentMode = activeAppModeRef.current;
     const modeCurrent = dashboardCurrentByMode(data, currentMode);
-    const currentProfileName = findProfileNameForCurrent(
-      data,
-      modeCurrent,
-      activeProfileByModeRef.current[currentMode],
-    );
+    const mergeQuotaFromCurrent = (profile: ProfileView): ProfileView => ({
+      ...profile,
+      fiveHourRemainingPercent: modeCurrent?.fiveHourRemainingPercent,
+      fiveHourResetsAt: modeCurrent?.fiveHourResetsAt,
+      oneWeekRemainingPercent: modeCurrent?.oneWeekRemainingPercent,
+      oneWeekResetsAt: modeCurrent?.oneWeekResetsAt,
+    });
+    const matchedByIdentity =
+      modeCurrent != null ? data.profiles.filter((profile) => profileMatchesCurrentIdentity(profile, modeCurrent)) : [];
+    const uniqueIdentityMatchName = matchedByIdentity.length === 1 ? matchedByIdentity[0].name : null;
+    const mergeTargetName = uniqueIdentityMatchName;
     const mergedProfiles =
-      currentProfileName && modeCurrent
+      modeCurrent != null && mergeTargetName
         ? data.profiles.map((profile) =>
-            profile.name === currentProfileName
-              ? {
-                  ...profile,
-                  fiveHourRemainingPercent: modeCurrent?.fiveHourRemainingPercent,
-                  fiveHourResetsAt: modeCurrent?.fiveHourResetsAt,
-                  oneWeekRemainingPercent: modeCurrent?.oneWeekRemainingPercent,
-                  oneWeekResetsAt: modeCurrent?.oneWeekResetsAt,
-                }
-              : profile,
+            profile.name === mergeTargetName ? mergeQuotaFromCurrent(profile) : profile,
           )
         : data.profiles;
     const nextDashboard = mergedProfiles === data.profiles ? data : { ...data, profiles: mergedProfiles };
@@ -2130,6 +2153,14 @@ function App() {
         : null,
     [activeAppMode, activeProfileByMode, dashboard, modeCurrent],
   );
+
+  const liveQuotaMergeTargetName = useMemo(() => {
+    if (!dashboard || !modeCurrent) {
+      return null;
+    }
+    const matched = dashboard.profiles.filter((profile) => profileMatchesCurrentIdentity(profile, modeCurrent));
+    return matched.length === 1 ? matched[0].name : null;
+  }, [dashboard, modeCurrent]);
 
   useEffect(() => {
     setSelected((prev) => {
@@ -2378,7 +2409,7 @@ function App() {
     );
   };
 
-  const onRefreshSelectedQuota = async (name?: string, refreshToken = false) => {
+  const onRefreshSelectedQuota = async (name?: string, refreshToken = true) => {
     const target = name ?? requireSelectedName();
     if (!target) {
       return;
@@ -2394,7 +2425,7 @@ function App() {
   };
 
   const onRefreshAllQuota = useCallback(
-    async (refreshToken = false) => {
+    async (refreshToken = true) => {
       await runDashboardCommand(
         "refresh_all_quota",
         { refreshToken, mode: activeAppMode },
@@ -3625,7 +3656,7 @@ function App() {
           <button
             className="header-icon"
             disabled={uiBusy}
-            onClick={() => void onRefreshAllQuota(false)}
+                    onClick={() => void onRefreshAllQuota(true)}
             title={quotaQuerying ? "配额查询中..." : "刷新全部额度"}
             aria-label={quotaQuerying ? "配额查询中" : "刷新全部额度"}
           >
@@ -3808,7 +3839,7 @@ function App() {
                   <div className="cards-list">
                     {filteredProfiles.map((p, idx) => {
                       const liveSyncedProfile =
-                        p.name === currentProfileName && modeCurrent
+                        p.name === liveQuotaMergeTargetName && modeCurrent
                           ? {
                               ...p,
                               fiveHourRemainingPercent: modeCurrent.fiveHourRemainingPercent,
@@ -3838,7 +3869,7 @@ function App() {
                               : null
                           }
                           onSelect={setSelected}
-                          onRefreshQuota={(name) => void onRefreshSelectedQuota(name, false)}
+                          onRefreshQuota={(name) => void onRefreshSelectedQuota(name, true)}
                           onApply={(name) => void onApplySelected(name)}
                           onSetAlias={(name) => void onSetAlias(name)}
                           onDelete={(name) => void onDeleteSelected(name)}

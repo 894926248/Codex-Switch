@@ -227,12 +227,15 @@ const AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS: u64 = 8;
 const AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS: u64 = 3;
 const OPENCODE_LOG_RECENT_WINDOW_MS: i64 = 120_000;
 const CURRENT_QUOTA_CACHE_FRESH_MS: i64 = 500;
+const GPT_CURRENT_QUOTA_CACHE_FRESH_MS: i64 = 5_000;
 const CURRENT_QUOTA_CACHE_MAX_AGE_MS: i64 = 30 * 60 * 1000;
 const CURRENT_QUOTA_ERROR_COOLDOWN_MS: i64 = 8_000;
 const LIVE_QUOTA_STORE_SYNC_INTERVAL_MS: i64 = 5_000;
 const APP_SERVER_TIMEOUT_DEFAULT_SECONDS: u64 = 14;
 const APP_SERVER_TIMEOUT_POLL_SECONDS: u64 = 3;
 const APP_SERVER_OPENCODE_POLL_TIMEOUT_SECONDS: u64 = 8;
+const GPT_RATE_LIMIT_PUSH_READ_INTERVAL_MS: i64 = 20_000;
+const GPT_RATE_LIMIT_PUSH_RESTART_BACKOFF_MS: i64 = 3_000;
 const APP_SERVER_DEBUG_ENV: &str = "CODEX_SWITCH_APP_SERVER_LOG";
 const AUTO_SWITCH_THREAD_RECOVER_COOLDOWN_MS: i64 = 5_000;
 const AUTO_SWITCH_THREAD_RECOVER_HARD_COOLDOWN_MS: i64 = 12_000;
@@ -314,12 +317,20 @@ struct CurrentQuotaRuntimeCache {
     last_error_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Default)]
+struct GptRateLimitPushState {
+    running: bool,
+    codex_home: Option<PathBuf>,
+    last_error: Option<String>,
+}
+
 static CURRENT_QUOTA_RUNTIME_CACHE: OnceLock<Mutex<CurrentQuotaRuntimeCache>> = OnceLock::new();
 static OPENCODE_CURRENT_QUOTA_RUNTIME_CACHE: OnceLock<Mutex<CurrentQuotaRuntimeCache>> =
     OnceLock::new();
 static OPENCODE_QUOTA_BRIDGE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static APP_RUNTIME_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 static LIVE_QUOTA_STORE_SYNC_STATE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+static GPT_RATE_LIMIT_PUSH_STATE: OnceLock<Mutex<GptRateLimitPushState>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoreData {
@@ -4054,7 +4065,7 @@ fn app_server_debug_enabled() -> bool {
             let lowered = value.trim().to_lowercase();
             !matches!(lowered.as_str(), "0" | "false" | "off" | "no")
         }
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
@@ -6238,9 +6249,29 @@ fn account_quota_from_app_server_responses(
     account_msg_id: i64,
     rate_limits_msg_id: i64,
 ) -> CmdResult<AccountQuota> {
-    let account = responses
+    let account_result = responses
         .get(&account_msg_id)
         .and_then(|v| v.get("result"))
+        .cloned();
+    let rate_limits_result = responses
+        .get(&rate_limits_msg_id)
+        .and_then(|v| v.get("result"))
+        .cloned()
+        .ok_or_else(|| "未在 app-server 响应中找到额度信息。".to_string())?;
+
+    account_quota_from_rate_limits_result(
+        codex_home,
+        account_result.as_ref(),
+        &rate_limits_result,
+    )
+}
+
+fn account_quota_from_rate_limits_result(
+    codex_home: &Path,
+    account_result: Option<&Value>,
+    rate_limits_result: &Value,
+) -> CmdResult<AccountQuota> {
+    let account = account_result
         .and_then(|v| v.get("account"))
         .and_then(Value::as_object)
         .cloned()
@@ -6257,14 +6288,8 @@ fn account_quota_from_app_server_responses(
     let (workspace_name, workspace_id) =
         read_workspace_info_from_auth_file(&codex_home.join(AUTH_FILE_NAME));
 
-    let result = responses
-        .get(&rate_limits_msg_id)
-        .and_then(|v| v.get("result"))
-        .cloned()
-        .ok_or_else(|| "未在 app-server 响应中找到额度信息。".to_string())?;
-
     let mut snapshot: Option<Value> = None;
-    if let Some(by_limit) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {
+    if let Some(by_limit) = rate_limits_result.get("rateLimitsByLimitId").and_then(Value::as_object) {
         if let Some(codex_limits) = by_limit.get("codex").and_then(Value::as_object) {
             snapshot = Some(Value::Object(codex_limits.clone()));
         } else if let Some((_, first)) = by_limit.iter().next() {
@@ -6274,7 +6299,7 @@ fn account_quota_from_app_server_responses(
         }
     }
     if snapshot.is_none() {
-        if let Some(rate_limits) = result.get("rateLimits").and_then(Value::as_object) {
+        if let Some(rate_limits) = rate_limits_result.get("rateLimits").and_then(Value::as_object) {
             snapshot = Some(Value::Object(rate_limits.clone()));
         }
     }
@@ -6338,6 +6363,238 @@ fn fetch_quota_from_codex_home(codex_home: &Path, refresh_token: bool) -> CmdRes
         refresh_token,
         APP_SERVER_TIMEOUT_DEFAULT_SECONDS,
     )
+}
+
+fn app_server_write_line(
+    stdin: &mut std::process::ChildStdin,
+    req: &Value,
+    debug_enabled: bool,
+) -> CmdResult<()> {
+    let line = serde_json::to_string(req).map_err(|e| format!("请求序列化失败: {e}"))?;
+    let safe_line = redact_app_server_request_for_log(req);
+    app_server_log(debug_enabled, format!("stdin >> {safe_line}"));
+    stdin
+        .write_all(format!("{line}\n").as_bytes())
+        .map_err(|e| format!("向 app-server 写入请求失败: {e}"))?;
+    stdin
+        .flush()
+        .map_err(|e| format!("刷新 app-server stdin 失败: {e}"))
+}
+
+fn handle_gpt_rate_limits_payload(
+    codex_home: &Path,
+    account_result: Option<&Value>,
+    rate_limits_result: &Value,
+    debug_enabled: bool,
+) {
+    let quota = match account_quota_from_rate_limits_result(codex_home, account_result, rate_limits_result) {
+        Ok(v) => v,
+        Err(err) => {
+            app_server_log(debug_enabled, format!("parse rateLimits payload failed: {err}"));
+            return;
+        }
+    };
+    let now_ms = now_ts_ms();
+    update_current_quota_runtime_cache(&quota, now_ms);
+    if let Ok(mut store) = load_store() {
+        sync_live_quota_to_store(&mut store, &quota, now_ms, AutoSwitchMode::Gpt, false);
+    }
+    if let Ok(mut state) = gpt_rate_limit_push_state().lock() {
+        state.last_error = None;
+    }
+}
+
+fn run_gpt_rate_limit_push_worker(codex_home: PathBuf) {
+    let debug_enabled = app_server_debug_enabled();
+    loop {
+        let mut cmd = match build_codex_command(&["app-server"]) {
+            Ok(v) => v,
+            Err(err) => {
+                if let Ok(mut state) = gpt_rate_limit_push_state().lock() {
+                    state.last_error = Some(err.clone());
+                    state.running = false;
+                }
+                return;
+            }
+        };
+        let mut child = match cmd
+            .env("CODEX_HOME", &codex_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(v) => v,
+            Err(err) => {
+                if let Ok(mut state) = gpt_rate_limit_push_state().lock() {
+                    state.last_error = Some(format!("启动 GPT 实时 app-server 失败: {err}"));
+                    state.running = false;
+                }
+                return;
+            }
+        };
+
+        let mut stdin = match child.stdin.take() {
+            Some(v) => v,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Ok(mut state) = gpt_rate_limit_push_state().lock() {
+                    state.last_error = Some("GPT 实时 app-server stdin 不可用。".to_string());
+                }
+                thread::sleep(Duration::from_millis(GPT_RATE_LIMIT_PUSH_RESTART_BACKOFF_MS as u64));
+                continue;
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(v) => v,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Ok(mut state) = gpt_rate_limit_push_state().lock() {
+                    state.last_error = Some("GPT 实时 app-server stdout 不可用。".to_string());
+                }
+                thread::sleep(Duration::from_millis(GPT_RATE_LIMIT_PUSH_RESTART_BACKOFF_MS as u64));
+                continue;
+            }
+        };
+        let stderr = child.stderr.take();
+
+        if let Some(err_stream) = stderr {
+            let stderr_log_enabled = debug_enabled;
+            thread::spawn(move || {
+                let reader = BufReader::new(err_stream);
+                for line in reader.lines().map_while(Result::ok) {
+                    app_server_log(stderr_log_enabled, format!("push stderr << {line}"));
+                }
+            });
+        }
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let stdout_log_enabled = debug_enabled;
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                app_server_log(stdout_log_enabled, format!("push stdout << {line}"));
+                let _ = tx.send(line);
+            }
+        });
+
+        let init = json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "codex-switch", "version": "1.0.0"},
+                "capabilities": {"experimentalApi": true}
+            }
+        });
+        let read_account = json!({
+            "id": 2,
+            "method": "account/read",
+            "params": {"refreshToken": false}
+        });
+        let read_limits = json!({
+            "id": 3,
+            "method": "account/rateLimits/read",
+            "params": Value::Null
+        });
+        if app_server_write_line(&mut stdin, &init, debug_enabled).is_err()
+            || app_server_write_line(&mut stdin, &read_account, debug_enabled).is_err()
+            || app_server_write_line(&mut stdin, &read_limits, debug_enabled).is_err()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Ok(mut state) = gpt_rate_limit_push_state().lock() {
+                state.last_error = Some("GPT 实时 push 初始化请求失败。".to_string());
+            }
+            thread::sleep(Duration::from_millis(GPT_RATE_LIMIT_PUSH_RESTART_BACKOFF_MS as u64));
+            continue;
+        }
+
+        let mut next_read_at_ms = now_ts_ms() + GPT_RATE_LIMIT_PUSH_READ_INTERVAL_MS;
+        let mut next_req_id: i64 = 1000;
+        let mut last_account_result: Option<Value> = None;
+
+        loop {
+            let now_ms = now_ts_ms();
+            if now_ms >= next_read_at_ms {
+                let req = json!({
+                    "id": next_req_id,
+                    "method": "account/rateLimits/read",
+                    "params": Value::Null
+                });
+                if app_server_write_line(&mut stdin, &req, debug_enabled).is_err() {
+                    break;
+                }
+                next_req_id += 1;
+                next_read_at_ms = now_ms + GPT_RATE_LIMIT_PUSH_READ_INTERVAL_MS;
+            }
+
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(line) => {
+                    let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if let Some(id) = msg.get("id").and_then(Value::as_i64) {
+                        if id == 2 {
+                            last_account_result = msg.get("result").cloned();
+                        }
+                        if msg.get("result").is_some() && (id == 3 || id >= 1000) {
+                            if let Some(result) = msg.get("result") {
+                                handle_gpt_rate_limits_payload(
+                                    &codex_home,
+                                    last_account_result.as_ref(),
+                                    result,
+                                    debug_enabled,
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    if msg
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .map(|m| m == "account/rateLimits/updated")
+                        .unwrap_or(false)
+                    {
+                        if let Some(params) = msg.get("params") {
+                            handle_gpt_rate_limits_payload(
+                                &codex_home,
+                                last_account_result.as_ref(),
+                                params,
+                                debug_enabled,
+                            );
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Ok(mut state) = gpt_rate_limit_push_state().lock() {
+            state.last_error = Some("GPT 实时 push 连接中断，准备重连。".to_string());
+        }
+        thread::sleep(Duration::from_millis(GPT_RATE_LIMIT_PUSH_RESTART_BACKOFF_MS as u64));
+    }
+}
+
+fn ensure_gpt_rate_limit_push_worker(codex_home: &Path) {
+    let Ok(mut state) = gpt_rate_limit_push_state().lock() else {
+        return;
+    };
+    if state.running {
+        return;
+    }
+    state.running = true;
+    state.codex_home = Some(codex_home.to_path_buf());
+    state.last_error = None;
+    let home = codex_home.to_path_buf();
+    thread::spawn(move || {
+        run_gpt_rate_limit_push_worker(home);
+    });
 }
 
 fn extract_opencode_account_id_from_jwt(token: &str) -> Option<String> {
@@ -7883,6 +8140,10 @@ fn live_quota_store_sync_state() -> &'static Mutex<HashMap<String, i64>> {
     LIVE_QUOTA_STORE_SYNC_STATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn gpt_rate_limit_push_state() -> &'static Mutex<GptRateLimitPushState> {
+    GPT_RATE_LIMIT_PUSH_STATE.get_or_init(|| Mutex::new(GptRateLimitPushState::default()))
+}
+
 fn live_quota_store_sync_allowed(sync_key: &str, now_ms: i64, force: bool) -> bool {
     if force {
         return true;
@@ -8187,7 +8448,7 @@ fn load_live_opencode_current_status(
     let can_use_fresh_cached = !sync_current
         && cached_quota
             .as_ref()
-            .map(|(_, age_ms)| *age_ms <= CURRENT_QUOTA_CACHE_FRESH_MS)
+            .map(|(_, age_ms)| *age_ms <= GPT_CURRENT_QUOTA_CACHE_FRESH_MS)
             .unwrap_or(false);
     if can_use_fresh_cached {
         return (
@@ -8256,6 +8517,9 @@ fn load_dashboard_internal_for_mode(
         }
     }
     let codex_home_opt = codex_home().ok();
+    if let Some(codex_home) = codex_home_opt.as_ref() {
+        ensure_gpt_rate_limit_push_worker(codex_home);
+    }
     let cached_quota = cached_current_quota_snapshot(now_ms).and_then(|(quota, age_ms)| {
         if let Some(codex_home) = codex_home_opt.as_ref() {
             if cached_quota_matches_live_workspace(codex_home, &quota) {
@@ -8283,6 +8547,32 @@ fn load_dashboard_internal_for_mode(
                 current_error,
                 current_error_mode,
             ));
+        }
+    }
+    if sync_current || !current_quota_runtime_error_is_hot(now_ms, CURRENT_QUOTA_ERROR_COOLDOWN_MS) {
+        if let Some(codex_home) = codex_home_opt.as_ref() {
+            let quota_timeout_seconds = if sync_current {
+                APP_SERVER_TIMEOUT_DEFAULT_SECONDS
+            } else {
+                APP_SERVER_TIMEOUT_POLL_SECONDS
+            };
+            match fetch_quota_from_codex_home_with_timeout(codex_home, false, quota_timeout_seconds) {
+                Ok(quota) => {
+                    update_current_quota_runtime_cache(&quota, now_ms);
+                    sync_live_quota_to_store(&mut store, &quota, now_ms, AutoSwitchMode::Gpt, sync_current);
+                    current = Some(current_status_from_quota(&store, &quota));
+                    return Ok(build_dashboard(
+                        &store,
+                        current,
+                        opencode_current,
+                        current_error,
+                        current_error_mode,
+                    ));
+                }
+                Err(err) => {
+                    mark_current_quota_runtime_error(&err, now_ms);
+                }
+            }
         }
     }
     if let Some(quota) = quota_from_rollout_snapshot(&store) {
