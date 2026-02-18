@@ -122,7 +122,9 @@ interface SkillEntryView {
   directory: string;
   name: string;
   description: string;
+  claudeEnabled: boolean;
   codexEnabled: boolean;
+  geminiEnabled: boolean;
   opencodeEnabled: boolean;
   codexAvailable: boolean;
   opencodeAvailable: boolean;
@@ -132,7 +134,9 @@ interface SkillEntryView {
 
 interface SkillsCatalogView {
   total: number;
+  claudeEnabledCount: number;
   codexEnabledCount: number;
+  geminiEnabledCount: number;
   opencodeEnabledCount: number;
   skills: SkillEntryView[];
 }
@@ -214,7 +218,7 @@ interface McpPresetOption {
 type PostSwitchStrategy = "hook" | "restart_extension_host";
 type AppMode = "gpt" | "opencode";
 type ActiveProfileByMode = Record<AppMode, string | null>;
-type SkillTarget = "codex" | "opencode";
+type SkillTarget = "claude" | "codex" | "gemini" | "opencode";
 type McpTarget = "claude" | "codex" | "gemini" | "opencode";
 type ToolView = "dashboard" | "skills" | "skillsDiscovery" | "skillsRepos" | "prompts" | "mcp" | "mcpAdd";
 
@@ -862,12 +866,16 @@ function SkillTargetSwitch({ label, icon, checked, busy, onClick }: SkillTargetS
 }
 
 function recomputeSkillsCatalog(catalog: SkillsCatalogView): SkillsCatalogView {
+  const claudeEnabledCount = catalog.skills.filter((item) => item.claudeEnabled).length;
   const codexEnabledCount = catalog.skills.filter((item) => item.codexEnabled).length;
+  const geminiEnabledCount = catalog.skills.filter((item) => item.geminiEnabled).length;
   const opencodeEnabledCount = catalog.skills.filter((item) => item.opencodeEnabled).length;
   return {
     ...catalog,
     total: catalog.skills.length,
+    claudeEnabledCount,
     codexEnabledCount,
+    geminiEnabledCount,
     opencodeEnabledCount,
   };
 }
@@ -1498,7 +1506,9 @@ function App() {
 
   const onToggleSkillTarget = useCallback(
     async (skill: SkillEntryView, target: SkillTarget) => {
+      const nextClaude = target === "claude" ? !skill.claudeEnabled : skill.claudeEnabled;
       const nextCodex = target === "codex" ? !skill.codexEnabled : skill.codexEnabled;
+      const nextGemini = target === "gemini" ? !skill.geminiEnabled : skill.geminiEnabled;
       const nextOpenCode = target === "opencode" ? !skill.opencodeEnabled : skill.opencodeEnabled;
       setSkillsBusyIds((prev) => ({ ...prev, [skill.id]: true }));
       setSkillsCatalog((prev) => {
@@ -1511,7 +1521,9 @@ function App() {
             item.id === skill.id
               ? {
                   ...item,
+                  claudeEnabled: nextClaude,
                   codexEnabled: nextCodex,
+                  geminiEnabled: nextGemini,
                   opencodeEnabled: nextOpenCode,
                 }
               : item,
@@ -1522,7 +1534,9 @@ function App() {
       try {
         const data = await invoke<SkillsCatalogView>("set_skill_targets", {
           skillId: skill.id,
+          claude: nextClaude,
           codex: nextCodex,
+          gemini: nextGemini,
           opencode: nextOpenCode,
         });
         setSkillsCatalog(recomputeSkillsCatalog(data));
@@ -1586,9 +1600,9 @@ function App() {
 
   const skillsSummaryText = useMemo(() => {
     if (!skillsCatalog) {
-      return "已安装 · Skills: 0 · Codex: 0 · OpenCode: 0";
+      return "已安装 · Skills: 0 · Claude: 0 · Codex: 0 · Gemini: 0 · OpenCode: 0";
     }
-    return `已安装 · Skills: ${skillsCatalog.total} · Codex: ${skillsCatalog.codexEnabledCount} · OpenCode: ${skillsCatalog.opencodeEnabledCount}`;
+    return `已安装 · Skills: ${skillsCatalog.total} · Claude: ${skillsCatalog.claudeEnabledCount} · Codex: ${skillsCatalog.codexEnabledCount} · Gemini: ${skillsCatalog.geminiEnabledCount} · OpenCode: ${skillsCatalog.opencodeEnabledCount}`;
   }, [skillsCatalog]);
 
   const skillsDiscoverySummaryText = useMemo(() => {
@@ -3491,11 +3505,23 @@ function App() {
                     </div>
                     <div className="skills-inline-targets">
                       <SkillTargetSwitch
+                        label="Claude"
+                        checked={skill.claudeEnabled}
+                        busy={busy}
+                        onClick={() => void onToggleSkillTarget(skill, "claude")}
+                      />
+                      <SkillTargetSwitch
                         label="Codex"
                         icon={openaiLogo}
                         checked={skill.codexEnabled}
                         busy={busy || !codexAvailable}
                         onClick={() => void onToggleSkillTarget(skill, "codex")}
+                      />
+                      <SkillTargetSwitch
+                        label="Gemini"
+                        checked={skill.geminiEnabled}
+                        busy={busy}
+                        onClick={() => void onToggleSkillTarget(skill, "gemini")}
                       />
                       <SkillTargetSwitch
                         label="OpenCode"

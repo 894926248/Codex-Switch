@@ -418,7 +418,9 @@ struct SkillEntryView {
     directory: String,
     name: String,
     description: String,
+    claude_enabled: bool,
     codex_enabled: bool,
+    gemini_enabled: bool,
     opencode_enabled: bool,
     codex_available: bool,
     opencode_available: bool,
@@ -430,7 +432,9 @@ struct SkillEntryView {
 #[serde(rename_all = "camelCase")]
 struct SkillsCatalogView {
     total: usize,
+    claude_enabled_count: usize,
     codex_enabled_count: usize,
+    gemini_enabled_count: usize,
     opencode_enabled_count: usize,
     skills: Vec<SkillEntryView>,
 }
@@ -559,7 +563,9 @@ struct CcSwitchSkillDbRow {
 
 #[derive(Debug, Clone, Copy)]
 struct CcSwitchSkillTargetFlags {
+    claude_enabled: bool,
     codex_enabled: bool,
+    gemini_enabled: bool,
     opencode_enabled: bool,
 }
 
@@ -1511,7 +1517,7 @@ fn ccswitch_load_skill_target_flags_map() -> CmdResult<HashMap<String, CcSwitchS
 
     let mut stmt = conn
         .prepare(
-            "SELECT directory, enabled_codex, enabled_opencode
+            "SELECT directory, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode
              FROM skills
              WHERE directory IS NOT NULL AND trim(directory) <> ''
              ORDER BY installed_at DESC",
@@ -1523,20 +1529,24 @@ fn ccswitch_load_skill_target_flags_map() -> CmdResult<HashMap<String, CcSwitchS
                 row.get::<_, String>(0)?,
                 row.get::<_, bool>(1)?,
                 row.get::<_, bool>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, bool>(4)?,
             ))
         })
         .map_err(|e| format!("遍历 CC Switch skills 开关状态失败: {e}"))?;
 
     let mut out: HashMap<String, CcSwitchSkillTargetFlags> = HashMap::new();
     for item in rows {
-        let (directory, codex_enabled, opencode_enabled) =
+        let (directory, claude_enabled, codex_enabled, gemini_enabled, opencode_enabled) =
             item.map_err(|e| format!("解析 CC Switch skills 开关状态失败: {e}"))?;
         let key = directory.trim().to_lowercase();
         if key.is_empty() {
             continue;
         }
         out.entry(key).or_insert(CcSwitchSkillTargetFlags {
+            claude_enabled,
             codex_enabled,
+            gemini_enabled,
             opencode_enabled,
         });
     }
@@ -1949,9 +1959,9 @@ fn ccswitch_upsert_skill_row(conn: &Connection, skill: &SkillEntryView) -> CmdRe
                 row.repo_name,
                 row.repo_branch,
                 row.readme_url,
-                row.enabled_claude,
+                skill.claude_enabled,
                 skill.codex_enabled,
-                row.enabled_gemini,
+                skill.gemini_enabled,
                 skill.opencode_enabled,
                 if row.installed_at > 0 {
                     row.installed_at
@@ -1970,13 +1980,15 @@ fn ccswitch_upsert_skill_row(conn: &Connection, skill: &SkillEntryView) -> CmdRe
         "INSERT INTO skills
          (id, name, description, directory, repo_owner, repo_name, repo_branch, readme_url,
           enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, installed_at)
-         VALUES (?1, ?2, ?3, ?4, NULL, NULL, 'main', NULL, 0, ?5, 0, ?6, ?7)",
+         VALUES (?1, ?2, ?3, ?4, NULL, NULL, 'main', NULL, ?5, ?6, ?7, ?8, ?9)",
         params![
             new_id,
             display_name,
             description,
             skill.directory,
+            skill.claude_enabled,
             skill.codex_enabled,
+            skill.gemini_enabled,
             skill.opencode_enabled,
             now_ts,
         ],
@@ -2845,7 +2857,9 @@ fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
         .map(|mut entry| {
             let opencode_present = entry.opencode_source || entry.opencode_legacy_source;
             let flags = target_flags.get(&entry.directory.to_lowercase());
+            let claude_enabled = flags.map(|item| item.claude_enabled).unwrap_or(false);
             let codex_enabled = flags.map(|item| item.codex_enabled).unwrap_or(entry.codex_source);
+            let gemini_enabled = flags.map(|item| item.gemini_enabled).unwrap_or(false);
             let opencode_enabled = flags
                 .map(|item| item.opencode_enabled)
                 .unwrap_or(opencode_present);
@@ -2858,7 +2872,9 @@ fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
                 directory: entry.directory,
                 name: entry.name,
                 description: entry.description,
+                claude_enabled,
                 codex_enabled,
+                gemini_enabled,
                 opencode_enabled,
                 codex_available: has_source,
                 opencode_available: has_source,
@@ -2870,13 +2886,17 @@ fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
 
     skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
+    let claude_enabled_count = skills.iter().filter(|s| s.claude_enabled).count();
     let codex_enabled_count = skills.iter().filter(|s| s.codex_enabled).count();
+    let gemini_enabled_count = skills.iter().filter(|s| s.gemini_enabled).count();
     let opencode_enabled_count = skills.iter().filter(|s| s.opencode_enabled).count();
     let total = skills.len();
 
     let catalog = SkillsCatalogView {
         total,
+        claude_enabled_count,
         codex_enabled_count,
+        gemini_enabled_count,
         opencode_enabled_count,
         skills,
     };
@@ -2888,7 +2908,9 @@ fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
 
 fn set_skill_targets_internal(
     skill_id: &str,
+    claude: Option<bool>,
     codex: bool,
+    gemini: Option<bool>,
     opencode: bool,
 ) -> CmdResult<SkillsCatalogView> {
     let key_raw = skill_id.trim();
@@ -2925,7 +2947,9 @@ fn set_skill_targets_internal(
     }
 
     let mut updated_skill = skill.clone();
+    updated_skill.claude_enabled = claude.unwrap_or(skill.claude_enabled);
     updated_skill.codex_enabled = codex;
+    updated_skill.gemini_enabled = gemini.unwrap_or(skill.gemini_enabled);
     updated_skill.opencode_enabled = opencode;
     sync_skills_to_ccswitch_db(&[updated_skill])?;
 
@@ -11102,10 +11126,12 @@ async fn install_discovery_skill(
 #[tauri::command]
 fn set_skill_targets(
     skill_id: String,
+    claude: Option<bool>,
     codex: bool,
+    gemini: Option<bool>,
     opencode: bool,
 ) -> CmdResult<SkillsCatalogView> {
-    set_skill_targets_internal(&skill_id, codex, opencode)
+    set_skill_targets_internal(&skill_id, claude, codex, gemini, opencode)
 }
 
 #[tauri::command]
