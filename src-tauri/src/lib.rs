@@ -7832,23 +7832,8 @@ fn load_dashboard_internal_for_mode(
             return Ok(build_dashboard(&store, current, opencode_current, current_error));
         }
     }
-    if !sync_current
-        && current_quota_runtime_error_is_hot(now_ms, CURRENT_QUOTA_ERROR_COOLDOWN_MS)
-        && cached_quota.is_some()
-    {
-        if let Some((quota, _)) = cached_quota.as_ref() {
-            current = Some(current_status_from_quota(&store, quota));
-            return Ok(build_dashboard(&store, current, opencode_current, current_error));
-        }
-    }
-
     // Prefer live ~/.codex; fallback to recent cache when host/limit endpoint transiently fails.
-    let quota_timeout_seconds = if sync_current {
-        APP_SERVER_TIMEOUT_DEFAULT_SECONDS
-    } else {
-        APP_SERVER_TIMEOUT_POLL_SECONDS
-    };
-    match fetch_quota_from_codex_home_with_timeout(&codex_home, false, quota_timeout_seconds) {
+    match fetch_quota_from_codex_home(&codex_home, false) {
         Ok(quota) => {
             update_current_quota_runtime_cache(&quota, now_ms);
             if sync_current {
