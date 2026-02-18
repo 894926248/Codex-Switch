@@ -317,7 +317,7 @@ const THREAD_RECOVER_TICK_MS = 2000;
 const AUTO_HOOK_VERSION_POLL_MS = 3000;
 const HOOK_LISTEN_POLL_MS = 3000;
 const HOOK_LISTEN_VSCODE_POLL_MS = 15_000;
-const LIVE_STATUS_POLL_MS = 250;
+const LIVE_STATUS_POLL_MS = 500;
 const LIVE_STATUS_FETCH_MIN_MS = 500;
 const LIVE_STATUS_ERROR_RETRY_MS = 250;
 const LIVE_STATUS_ERROR_RETRY_MAX_MS = 900;
@@ -1861,7 +1861,10 @@ function App() {
         syncCurrent: false,
         mode: activeAppModeRef.current,
       });
-      applyDashboard(data);
+      const nextSignature = buildDashboardSignature(data);
+      if (nextSignature !== dashboardSignatureRef.current) {
+        applyDashboard(data);
+      }
       liveStatusErrorStreakRef.current = 0;
       if (data.currentError) {
         const nowMs = Date.now();

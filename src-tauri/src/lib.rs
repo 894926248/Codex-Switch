@@ -303,28 +303,10 @@ struct CurrentQuotaRuntimeCache {
     last_error_at_ms: i64,
 }
 
-#[derive(Debug, Clone)]
-struct RolloutQuotaFileCache {
-    current_file: Option<PathBuf>,
-    offset: u64,
-    snapshot: SessionQuotaSnapshot,
-}
-
-impl Default for RolloutQuotaFileCache {
-    fn default() -> Self {
-        Self {
-            current_file: None,
-            offset: 0,
-            snapshot: SessionQuotaSnapshot::default(),
-        }
-    }
-}
-
 static CURRENT_QUOTA_RUNTIME_CACHE: OnceLock<Mutex<CurrentQuotaRuntimeCache>> = OnceLock::new();
 static OPENCODE_CURRENT_QUOTA_RUNTIME_CACHE: OnceLock<Mutex<CurrentQuotaRuntimeCache>> =
     OnceLock::new();
 static OPENCODE_QUOTA_BRIDGE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static ROLLOUT_QUOTA_FILE_CACHE: OnceLock<Mutex<RolloutQuotaFileCache>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoreData {
@@ -7565,10 +7547,6 @@ fn opencode_quota_bridge_lock() -> &'static Mutex<()> {
     OPENCODE_QUOTA_BRIDGE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn rollout_quota_file_cache() -> &'static Mutex<RolloutQuotaFileCache> {
-    ROLLOUT_QUOTA_FILE_CACHE.get_or_init(|| Mutex::new(RolloutQuotaFileCache::default()))
-}
-
 fn cached_quota_snapshot_for_cache(
     cache: &Mutex<CurrentQuotaRuntimeCache>,
     now_ms: i64,
@@ -7814,7 +7792,7 @@ fn load_dashboard_internal_for_mode(
     sync_current: bool,
     mode: Option<AutoSwitchMode>,
 ) -> CmdResult<DashboardData> {
-    let store = load_store()?;
+    let mut store = load_store()?;
     let now_ms = now_ts_ms();
     let need_gpt_current = !matches!(mode, Some(AutoSwitchMode::OpenCode));
     let need_opencode_current = true;
@@ -7824,7 +7802,7 @@ fn load_dashboard_internal_for_mode(
     } else {
         None
     };
-    let current_error = None;
+    let mut current_error = None;
     if !need_gpt_current {
         return Ok(build_dashboard(&store, current, opencode_current, current_error));
     }
@@ -9630,69 +9608,35 @@ fn process_session_log_line(line: &str, session: &mut SessionTailState) {
     process_event_msg_payload(payload, session);
 }
 
-fn merge_token_count_from_line_into_snapshot(line: &str, snapshot: &mut SessionQuotaSnapshot) {
-    if line.trim().is_empty() {
-        return;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return;
-    };
-    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
-        return;
-    }
-    let Some(payload) = value.get("payload").and_then(Value::as_object) else {
-        return;
-    };
-    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
-        return;
-    }
-    if let Some(rate_limits) = payload.get("rate_limits").and_then(Value::as_object) {
-        merge_runtime_quota_from_rate_limits(snapshot, rate_limits);
-    }
-}
-
 fn read_latest_rollout_session_quota_snapshot() -> Option<SessionQuotaSnapshot> {
     let path = find_latest_rollout_session_file()?;
-    let mut cache = rollout_quota_file_cache().lock().ok()?;
-    let file_changed = cache
-        .current_file
-        .as_ref()
-        .map(|p| p != &path)
-        .unwrap_or(true);
-    if file_changed {
-        cache.current_file = Some(path.clone());
-        cache.offset = 0;
-        cache.snapshot = SessionQuotaSnapshot::default();
-    }
-
-    let mut file = File::open(&path).ok()?;
-    let file_len = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-    if cache.offset > file_len {
-        cache.offset = 0;
-        cache.snapshot = SessionQuotaSnapshot::default();
-    }
-    if file.seek(SeekFrom::Start(cache.offset)).is_err() {
-        return None;
-    }
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let bytes = reader.read_line(&mut line).ok()?;
-        if bytes == 0 {
-            break;
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut snapshot = SessionQuotaSnapshot::default();
+    for line in reader.lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
         }
-        let clean = line.trim_end_matches(&['\r', '\n'][..]);
-        merge_token_count_from_line_into_snapshot(clean, &mut cache.snapshot);
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = value.get("payload").and_then(Value::as_object) else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+            continue;
+        }
+        if let Some(rate_limits) = payload.get("rate_limits").and_then(Value::as_object) {
+            merge_runtime_quota_from_rate_limits(&mut snapshot, rate_limits);
+        }
     }
-    cache.offset = reader.stream_position().unwrap_or(file_len);
-
-    if cache.snapshot.five_hour_remaining_percent.is_none()
-        && cache.snapshot.one_week_remaining_percent.is_none()
-    {
+    if snapshot.five_hour_remaining_percent.is_none() && snapshot.one_week_remaining_percent.is_none() {
         return None;
     }
-    Some(cache.snapshot.clone())
+    Some(snapshot)
 }
 
 fn quota_from_rollout_snapshot(store: &StoreData) -> Option<AccountQuota> {
