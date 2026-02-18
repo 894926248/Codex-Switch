@@ -559,12 +559,6 @@ struct CcSwitchSkillTargetFlags {
     opencode_enabled: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CcSwitchMcpTargetFlags {
-    codex_enabled: bool,
-    opencode_enabled: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupManifest {
@@ -1536,56 +1530,6 @@ fn ccswitch_load_skill_target_flags_map() -> CmdResult<HashMap<String, CcSwitchS
             opencode_enabled,
         });
     }
-    Ok(out)
-}
-
-fn ccswitch_load_mcp_target_flags_map() -> CmdResult<HashMap<String, CcSwitchMcpTargetFlags>> {
-    let db_path = ccswitch_db_file()?;
-    if !db_path.exists() {
-        return Ok(HashMap::new());
-    }
-
-    let conn = Connection::open(&db_path)
-        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
-    let _ = conn.busy_timeout(Duration::from_millis(1500));
-    if !ccswitch_db_has_mcp_servers_table(&conn)? {
-        return Ok(HashMap::new());
-    }
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, enabled_codex, enabled_opencode
-             FROM mcp_servers
-             WHERE id IS NOT NULL AND trim(id) <> ''",
-        )
-        .map_err(|e| format!("读取 CC Switch MCP 开关状态失败: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, bool>(1)?,
-                row.get::<_, bool>(2)?,
-            ))
-        })
-        .map_err(|e| format!("遍历 CC Switch MCP 开关状态失败: {e}"))?;
-
-    let mut out: HashMap<String, CcSwitchMcpTargetFlags> = HashMap::new();
-    for item in rows {
-        let (id, codex_enabled, opencode_enabled) =
-            item.map_err(|e| format!("解析 CC Switch MCP 开关状态失败: {e}"))?;
-        let key = id.trim().to_lowercase();
-        if key.is_empty() {
-            continue;
-        }
-        out.insert(
-            key,
-            CcSwitchMcpTargetFlags {
-                codex_enabled,
-                opencode_enabled,
-            },
-        );
-    }
-
     Ok(out)
 }
 
@@ -3704,16 +3648,11 @@ fn load_mcp_manage_internal() -> CmdResult<McpManageView> {
     let codex_map = read_codex_mcp_servers()?;
     let opencode_map = read_opencode_mcp_servers()?;
     let merged = merge_mcp_maps(&codex_map, &opencode_map);
-    let target_flags = ccswitch_load_mcp_target_flags_map()?;
     let mut servers: Vec<McpServerView> = Vec::new();
 
     for entry in merged {
-        let mut codex_enabled = entry.codex_spec.is_some();
-        let mut opencode_enabled = entry.opencode_spec.is_some();
-        if let Some(flags) = target_flags.get(&entry.id.to_lowercase()) {
-            codex_enabled = flags.codex_enabled;
-            opencode_enabled = flags.opencode_enabled;
-        }
+        let codex_enabled = entry.codex_spec.is_some();
+        let opencode_enabled = entry.opencode_spec.is_some();
         let codex_available = codex_enabled || opencode_enabled;
         let opencode_available = codex_enabled || opencode_enabled;
         let source = mcp_source_label(codex_enabled, opencode_enabled);

@@ -1441,6 +1441,7 @@ button {
 }
 
 .mcp-type-chip {
+  appearance: none;
   min-height: 34px;
   border-radius: 12px;
   border: 1px solid #e1e6eb;
@@ -1451,6 +1452,13 @@ button {
   padding: 0 16px;
   display: inline-flex;
   align-items: center;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.mcp-type-chip:hover {
+  border-color: #ccd5dd;
+  transform: translateY(-1px);
 }
 
 .mcp-type-chip.active {
@@ -1472,6 +1480,35 @@ button {
   font-size: 13px;
   color: #486171;
   font-weight: 600;
+}
+
+.mcp-metadata-toggle {
+  margin-top: 6px;
+  border: none;
+  background: transparent;
+  color: #6a737f;
+  font-size: 14px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.mcp-metadata-toggle:hover {
+  color: #425664;
+}
+
+.mcp-metadata-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.mcp-metadata-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .mcp-json-header {
@@ -1499,8 +1536,9 @@ button {
   color: #3b76ce;
 }
 
-.mcp-json-preview {
+.mcp-json-editor {
   margin: 10px 0 0;
+  width: 100%;
   border-radius: 10px;
   border: 1px solid #d9e1e8;
   background: #eef3fb;
@@ -1508,9 +1546,40 @@ button {
   font-size: 14px;
   line-height: 1.55;
   padding: 12px;
-  min-height: 120px;
-  white-space: pre-wrap;
-  word-break: break-word;
+  min-height: 180px;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.mcp-json-editor:focus {
+  border-color: #7aa8d7;
+  box-shadow: 0 0 0 2px rgba(122, 168, 215, 0.18);
+}
+
+.mcp-json-format-btn {
+  margin-top: 10px;
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: #556879;
+  font-size: 14px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  align-self: flex-start;
+  transition: color 0.16s ease;
+}
+
+.mcp-json-format-btn:hover {
+  color: #2f4c5c;
+}
+
+.mcp-json-format-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .mcp-create-bottom-bar {
@@ -1525,28 +1594,6 @@ button {
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
-}
-
-.mcp-create-cancel-btn {
-  height: 38px;
-  border-radius: 10px;
-  padding: 0 14px;
-  border: 1px solid #ccd9e0;
-  background: #ffffff;
-  color: #2b4653;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    background 0.16s ease,
-    border-color 0.16s ease,
-    transform 0.16s ease;
-}
-
-.mcp-create-cancel-btn:hover:not(:disabled) {
-  border-color: #b7ccd7;
-  background: #f9fcff;
-  transform: translateY(-1px);
 }
 
 .mcp-inline-empty {
@@ -2586,7 +2633,6 @@ button {
     gap: 8px;
   }
 
-  .mcp-create-cancel-btn,
   .mcp-create-bottom-bar .skill-repo-add-btn {
     flex: 1;
     justify-content: center;

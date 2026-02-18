@@ -19,7 +19,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowLeft, Book, ChevronDown, Download, ExternalLink, FileArchive, Plus, RefreshCw, Search, Server, Settings, Trash2, Wrench } from "lucide-react";
+import { ArrowLeft, Book, ChevronDown, ChevronUp, Download, ExternalLink, FileArchive, Plus, RefreshCw, Search, Server, Settings, Trash2, Wrench } from "lucide-react";
 import "./App.css";
 import openaiLogo from "./assets/openai.svg";
 import opencodeLogo from "./assets/opencode.svg";
@@ -197,11 +197,87 @@ interface McpManageView {
   servers: McpServerView[];
 }
 
+interface McpPresetOption {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  homepage: string;
+  docs: string;
+  spec: Record<string, unknown>;
+}
+
 type PostSwitchStrategy = "hook" | "restart_extension_host";
 type AppMode = "gpt" | "opencode";
 type ActiveProfileByMode = Record<AppMode, string | null>;
 type SkillTarget = "codex" | "opencode";
 type ToolView = "dashboard" | "skills" | "skillsDiscovery" | "skillsRepos" | "prompts" | "mcp" | "mcpAdd";
+
+const MCP_DEFAULT_CONFIG = '{\n  "type": "stdio",\n  "command": "uvx",\n  "args": ["mcp-server-fetch"]\n}';
+const IS_WINDOWS_PLATFORM = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+
+function createNpxPresetSpec(packageName: string): Record<string, unknown> {
+  if (IS_WINDOWS_PLATFORM) {
+    return {
+      type: "stdio",
+      command: "cmd",
+      args: ["/c", "npx", "-y", packageName],
+    };
+  }
+  return {
+    type: "stdio",
+    command: "npx",
+    args: ["-y", packageName],
+  };
+}
+
+const MCP_PRESET_OPTIONS: McpPresetOption[] = [
+  {
+    id: "fetch",
+    name: "mcp-server-fetch",
+    description: "通用 HTTP 请求工具，支持 GET/POST 等 HTTP 方法，适合快速请求接口或抓取网页数据。",
+    tags: ["stdio", "http", "web"],
+    homepage: "https://github.com/modelcontextprotocol/servers",
+    docs: "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+    spec: { type: "stdio", command: "uvx", args: ["mcp-server-fetch"] },
+  },
+  {
+    id: "time",
+    name: "@modelcontextprotocol/server-time",
+    description: "时间查询工具，提供当前时间、时区转换、日期计算等能力。",
+    tags: ["stdio", "time", "utility"],
+    homepage: "https://github.com/modelcontextprotocol/servers",
+    docs: "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
+    spec: createNpxPresetSpec("@modelcontextprotocol/server-time"),
+  },
+  {
+    id: "memory",
+    name: "@modelcontextprotocol/server-memory",
+    description: "知识图谱记忆系统，可存储实体、关系和观察信息。",
+    tags: ["stdio", "memory", "graph"],
+    homepage: "https://github.com/modelcontextprotocol/servers",
+    docs: "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
+    spec: createNpxPresetSpec("@modelcontextprotocol/server-memory"),
+  },
+  {
+    id: "sequential-thinking",
+    name: "@modelcontextprotocol/server-sequential-thinking",
+    description: "顺序思考工具，帮助 AI 分步拆解和推理复杂问题。",
+    tags: ["stdio", "thinking", "reasoning"],
+    homepage: "https://github.com/modelcontextprotocol/servers",
+    docs: "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
+    spec: createNpxPresetSpec("@modelcontextprotocol/server-sequential-thinking"),
+  },
+  {
+    id: "context7",
+    name: "@upstash/context7-mcp",
+    description: "Context7 文档搜索工具，提供最新库文档和示例代码。",
+    tags: ["stdio", "docs", "search"],
+    homepage: "https://context7.com",
+    docs: "https://github.com/upstash/context7/blob/master/README.md",
+    spec: createNpxPresetSpec("@upstash/context7-mcp"),
+  },
+];
 
 function formatCurrentErrorWithProfile(data: Pick<DashboardData, "activeProfile" | "profiles"> | null, raw?: string | null): string | null {
   if (!raw) {
@@ -859,13 +935,18 @@ function App() {
   const [mcpManageError, setMcpManageError] = useState<string | null>(null);
   const [mcpBusyIds, setMcpBusyIds] = useState<Record<string, boolean>>({});
   const [mcpFormId, setMcpFormId] = useState("");
-  const [mcpFormType, setMcpFormType] = useState<"stdio" | "sse" | "http">("stdio");
-  const [mcpFormCommand, setMcpFormCommand] = useState("npx");
-  const [mcpFormArgs, setMcpFormArgs] = useState("");
-  const [mcpFormUrl, setMcpFormUrl] = useState("");
-  const [mcpFormEnv, setMcpFormEnv] = useState("{}");
+  const [mcpFormName, setMcpFormName] = useState("");
+  const [mcpFormDescription, setMcpFormDescription] = useState("");
+  const [mcpFormTags, setMcpFormTags] = useState("");
+  const [mcpFormHomepage, setMcpFormHomepage] = useState("");
+  const [mcpFormDocs, setMcpFormDocs] = useState("");
+  const [mcpFormConfig, setMcpFormConfig] = useState(MCP_DEFAULT_CONFIG);
+  const [mcpSelectedPreset, setMcpSelectedPreset] = useState<string>("custom");
+  const [mcpShowMetadata, setMcpShowMetadata] = useState(false);
+  const [mcpFormClaudeEnabled, setMcpFormClaudeEnabled] = useState(true);
+  const [mcpFormGeminiEnabled, setMcpFormGeminiEnabled] = useState(true);
   const [mcpFormCodexEnabled, setMcpFormCodexEnabled] = useState(true);
-  const [mcpFormOpencodeEnabled, setMcpFormOpencodeEnabled] = useState(true);
+  const [mcpFormOpencodeEnabled, setMcpFormOpencodeEnabled] = useState(false);
   const [mcpFormError, setMcpFormError] = useState<string | null>(null);
 
   const autoTimerRef = useRef<number | null>(null);
@@ -1008,13 +1089,18 @@ function App() {
 
   const resetMcpAddForm = useCallback(() => {
     setMcpFormId("");
-    setMcpFormType("stdio");
-    setMcpFormCommand("npx");
-    setMcpFormArgs("");
-    setMcpFormUrl("");
-    setMcpFormEnv("{}");
+    setMcpFormName("");
+    setMcpFormDescription("");
+    setMcpFormTags("");
+    setMcpFormHomepage("");
+    setMcpFormDocs("");
+    setMcpFormConfig(MCP_DEFAULT_CONFIG);
+    setMcpSelectedPreset("custom");
+    setMcpShowMetadata(false);
+    setMcpFormClaudeEnabled(true);
+    setMcpFormGeminiEnabled(true);
     setMcpFormCodexEnabled(true);
-    setMcpFormOpencodeEnabled(true);
+    setMcpFormOpencodeEnabled(false);
     setMcpFormError(null);
   }, []);
 
@@ -1028,31 +1114,38 @@ function App() {
     setMcpFormError(null);
   }, []);
 
-  const parseMcpArgsInput = useCallback((raw: string): string[] => {
-    const text = raw.trim();
-    if (!text) {
-      return [];
+  const applyMcpPreset = useCallback((presetId: string) => {
+    if (presetId === "custom") {
+      setMcpSelectedPreset("custom");
+      setMcpFormId("");
+      setMcpFormName("");
+      setMcpFormDescription("");
+      setMcpFormTags("");
+      setMcpFormHomepage("");
+      setMcpFormDocs("");
+      setMcpFormConfig(MCP_DEFAULT_CONFIG);
+      setMcpFormError(null);
+      return;
     }
-    if (text.startsWith("[") && text.endsWith("]")) {
-      try {
-        const parsed = JSON.parse(text);
-        if (Array.isArray(parsed)) {
-          return parsed.map((item) => String(item)).map((item) => item.trim()).filter(Boolean);
-        }
-      } catch {
-        // fall back to whitespace split
-      }
+    const preset = MCP_PRESET_OPTIONS.find((item) => item.id === presetId);
+    if (!preset) {
+      return;
     }
-    return text
-      .split(/\s+/)
-      .map((item) => item.trim())
-      .filter(Boolean);
+    setMcpSelectedPreset(preset.id);
+    setMcpFormId(preset.id);
+    setMcpFormName(preset.name);
+    setMcpFormDescription(preset.description);
+    setMcpFormTags(preset.tags.join(", "));
+    setMcpFormHomepage(preset.homepage);
+    setMcpFormDocs(preset.docs);
+    setMcpFormConfig(JSON.stringify(preset.spec, null, 2));
+    setMcpFormError(null);
   }, []);
 
   const onSubmitMcpAdd = useCallback(async () => {
     const id = mcpFormId.trim();
     if (!id) {
-      setMcpFormError("MCP ID 不能为空。");
+      setMcpFormError("MCP 标题不能为空。");
       return;
     }
     if (!mcpFormCodexEnabled && !mcpFormOpencodeEnabled) {
@@ -1060,39 +1153,39 @@ function App() {
       return;
     }
 
-    const spec: Record<string, unknown> = { type: mcpFormType };
-    if (mcpFormType === "stdio") {
-      const command = mcpFormCommand.trim();
-      if (!command) {
-        setMcpFormError("stdio 类型 MCP 需要填写 command。");
+    let spec: Record<string, unknown>;
+    if (!mcpFormConfig.trim()) {
+      setMcpFormError("请填写 JSON 配置。");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(mcpFormConfig);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setMcpFormError("JSON 配置必须是对象。");
         return;
       }
-      spec.command = command;
-      const args = parseMcpArgsInput(mcpFormArgs);
-      if (args.length > 0) {
-        spec.args = args;
+      spec = parsed as Record<string, unknown>;
+    } catch {
+      setMcpFormError("JSON 配置格式无效。");
+      return;
+    }
+
+    const type = String(spec.type ?? "stdio").trim().toLowerCase();
+    if (type === "stdio") {
+      const command = String(spec.command ?? "").trim();
+      if (!command) {
+        setMcpFormError("stdio 类型的 MCP 服务器缺少 command 字段。");
+        return;
       }
-      const envText = mcpFormEnv.trim();
-      if (envText && envText !== "{}") {
-        try {
-          const parsedEnv = JSON.parse(envText);
-          if (!parsedEnv || typeof parsedEnv !== "object" || Array.isArray(parsedEnv)) {
-            setMcpFormError("env 必须是 JSON 对象。");
-            return;
-          }
-          spec.env = parsedEnv as Record<string, unknown>;
-        } catch {
-          setMcpFormError("env JSON 格式无效。");
-          return;
-        }
+    } else if (type === "http" || type === "sse") {
+      const url = String(spec.url ?? "").trim();
+      if (!url) {
+        setMcpFormError(`${type} 类型的 MCP 服务器缺少 url 字段。`);
+        return;
       }
     } else {
-      const url = mcpFormUrl.trim();
-      if (!url) {
-        setMcpFormError("远程 MCP 需要填写 URL。");
-        return;
-      }
-      spec.url = url;
+      setMcpFormError(`不支持的 MCP 服务器类型: ${type}`);
+      return;
     }
 
     const busyKey = "__add__";
@@ -1120,16 +1213,30 @@ function App() {
     }
   }, [
     mcpFormId,
-    mcpFormType,
-    mcpFormCommand,
-    mcpFormArgs,
-    mcpFormUrl,
-    mcpFormEnv,
+    mcpFormConfig,
     mcpFormCodexEnabled,
     mcpFormOpencodeEnabled,
-    parseMcpArgsInput,
     resetMcpAddForm,
   ]);
+
+  const onFormatMcpConfig = useCallback(() => {
+    const text = mcpFormConfig.trim();
+    if (!text) {
+      setMcpFormError("请先填写 JSON 配置。");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setMcpFormError("JSON 配置必须是对象。");
+        return;
+      }
+      setMcpFormConfig(JSON.stringify(parsed, null, 2));
+      setMcpFormError(null);
+    } catch {
+      setMcpFormError("JSON 配置格式无效，无法格式化。");
+    }
+  }, [mcpFormConfig]);
 
   const onToggleMcpTarget = useCallback(
     async (server: McpServerView, target: SkillTarget) => {
@@ -1508,37 +1615,6 @@ function App() {
 
   const mcpSyncingEmpty =
     mcpManageRefreshing && !mcpManageLoading && (mcpManage?.servers.length ?? 0) === 0;
-
-  const mcpSpecPreviewText = useMemo(() => {
-    const spec: Record<string, unknown> = { type: mcpFormType };
-    if (mcpFormType === "stdio") {
-      const command = mcpFormCommand.trim();
-      if (command) {
-        spec.command = command;
-      }
-      const args = parseMcpArgsInput(mcpFormArgs);
-      if (args.length > 0) {
-        spec.args = args;
-      }
-      const envText = mcpFormEnv.trim();
-      if (envText && envText !== "{}") {
-        try {
-          const parsedEnv = JSON.parse(envText);
-          if (parsedEnv && typeof parsedEnv === "object" && !Array.isArray(parsedEnv)) {
-            spec.env = parsedEnv as Record<string, unknown>;
-          }
-        } catch {
-          // keep preview stable while user edits invalid JSON
-        }
-      }
-    } else {
-      const url = mcpFormUrl.trim();
-      if (url) {
-        spec.url = url;
-      }
-    }
-    return JSON.stringify(spec, null, 2);
-  }, [mcpFormType, mcpFormCommand, mcpFormArgs, mcpFormEnv, mcpFormUrl, parseMcpArgsInput]);
 
   useEffect(() => {
     if (activeToolView !== "skills") {
@@ -3784,31 +3860,44 @@ function App() {
           )}
         </main>
       ) : activeToolView === "mcpAdd" ? (
-        <main className="tools-pane-wrap mcp-create-view">
-          <section className="skills-page-header">
-            <div className="skills-page-left">
-              <button
-                type="button"
-                className="skills-back-btn"
-                onClick={() => closeMcpAddPage()}
-                title="返回 MCP 管理"
-                aria-label="返回 MCP 管理"
-              >
-                <ArrowLeft className="skills-back-icon" />
-              </button>
-              <h1 className="skills-inline-title">新增 MCP</h1>
-            </div>
-          </section>
+        <main className="tools-pane-wrap tools-pane-wrap-sticky-head mcp-create-view">
+          <div className="tools-pane-sticky-head">
+            <section className="skills-page-header">
+              <div className="skills-page-left">
+                <button
+                  type="button"
+                  className="skills-back-btn"
+                  onClick={() => closeMcpAddPage()}
+                  title="返回 MCP 管理"
+                  aria-label="返回 MCP 管理"
+                >
+                  <ArrowLeft className="skills-back-icon" />
+                </button>
+                <h1 className="skills-inline-title">新增 MCP</h1>
+              </div>
+            </section>
+          </div>
 
           <section className="skill-repo-form-panel mcp-create-card">
             <h2>选择 MCP 类型</h2>
             <div className="mcp-type-chip-row">
-              <span className="mcp-type-chip active">自定义</span>
-              <span className="mcp-type-chip">fetch</span>
-              <span className="mcp-type-chip">time</span>
-              <span className="mcp-type-chip">memory</span>
-              <span className="mcp-type-chip">sequential-thinking</span>
-              <span className="mcp-type-chip">context7</span>
+              <button
+                type="button"
+                className={`mcp-type-chip ${mcpSelectedPreset === "custom" ? "active" : ""}`}
+                onClick={() => applyMcpPreset("custom")}
+              >
+                自定义
+              </button>
+              {MCP_PRESET_OPTIONS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={`mcp-type-chip ${mcpSelectedPreset === preset.id ? "active" : ""}`}
+                  onClick={() => applyMcpPreset(preset.id)}
+                >
+                  {preset.id}
+                </button>
+              ))}
             </div>
 
             <label className="skill-repo-form-label">
@@ -3826,70 +3915,24 @@ function App() {
 
             <label className="skill-repo-form-label">
               <span>显示名称</span>
-              <input type="text" value={mcpFormId} readOnly placeholder="例如 @modelcontextprotocol/server-time" />
+              <input
+                type="text"
+                value={mcpFormName}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormName(event.target.value)}
+                placeholder="例如 @modelcontextprotocol/server-time"
+              />
             </label>
-
-            <label className="skill-repo-form-label">
-              <span>类型</span>
-              <div className="skills-discovery-select-wrap mcp-form-select-wrap">
-                <select
-                  value={mcpFormType}
-                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                    setMcpFormType(event.target.value as "stdio" | "sse" | "http")
-                  }
-                >
-                  <option value="stdio">stdio (本地命令)</option>
-                  <option value="sse">sse (远程)</option>
-                  <option value="http">http (远程)</option>
-                </select>
-                <ChevronDown className="skills-discovery-select-icon" />
-              </div>
-            </label>
-
-            {mcpFormType === "stdio" ? (
-              <>
-                <label className="skill-repo-form-label">
-                  <span>command</span>
-                  <input
-                    type="text"
-                    value={mcpFormCommand}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormCommand(event.target.value)}
-                    placeholder="例如: npx"
-                  />
-                </label>
-                <label className="skill-repo-form-label">
-                  <span>args (空格分隔，或 JSON 数组)</span>
-                  <input
-                    type="text"
-                    value={mcpFormArgs}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormArgs(event.target.value)}
-                    placeholder='例如: -y @upstash/context7-mcp 或 ["-y","pkg"]'
-                  />
-                </label>
-                <label className="skill-repo-form-label">
-                  <span>env (JSON 对象，可选)</span>
-                  <textarea
-                    value={mcpFormEnv}
-                    onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setMcpFormEnv(event.target.value)}
-                    placeholder='例如: {"API_KEY":"xxx"}'
-                    rows={4}
-                  />
-                </label>
-              </>
-            ) : (
-              <label className="skill-repo-form-label">
-                <span>URL</span>
-                <input
-                  type="text"
-                  value={mcpFormUrl}
-                  onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormUrl(event.target.value)}
-                  placeholder="例如: https://mcp.context7.com/mcp"
-                />
-              </label>
-            )}
 
             <div className="mcp-create-subtitle">启用到应用</div>
             <div className="mcp-form-targets">
+              <label className="mcp-form-target">
+                <input
+                  type="checkbox"
+                  checked={mcpFormClaudeEnabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormClaudeEnabled(event.target.checked)}
+                />
+                <span>Claude</span>
+              </label>
               <label className="mcp-form-target">
                 <input
                   type="checkbox"
@@ -3902,6 +3945,14 @@ function App() {
               <label className="mcp-form-target">
                 <input
                   type="checkbox"
+                  checked={mcpFormGeminiEnabled}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormGeminiEnabled(event.target.checked)}
+                />
+                <span>Gemini</span>
+              </label>
+              <label className="mcp-form-target">
+                <input
+                  type="checkbox"
                   checked={mcpFormOpencodeEnabled}
                   onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormOpencodeEnabled(event.target.checked)}
                 />
@@ -3909,6 +3960,56 @@ function App() {
                 <span>OpenCode</span>
               </label>
             </div>
+
+            <button
+              type="button"
+              className="mcp-metadata-toggle"
+              onClick={() => setMcpShowMetadata((prev) => !prev)}
+            >
+              {mcpShowMetadata ? <ChevronUp className="mcp-metadata-icon" /> : <ChevronDown className="mcp-metadata-icon" />}
+              附加信息
+            </button>
+
+            {mcpShowMetadata ? (
+              <div className="mcp-metadata-fields">
+                <label className="skill-repo-form-label">
+                  <span>描述</span>
+                  <input
+                    type="text"
+                    value={mcpFormDescription}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormDescription(event.target.value)}
+                    placeholder="可选的描述信息"
+                  />
+                </label>
+                <label className="skill-repo-form-label">
+                  <span>标签（逗号分隔）</span>
+                  <input
+                    type="text"
+                    value={mcpFormTags}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormTags(event.target.value)}
+                    placeholder="stdio, time, utility"
+                  />
+                </label>
+                <label className="skill-repo-form-label">
+                  <span>主页链接</span>
+                  <input
+                    type="text"
+                    value={mcpFormHomepage}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormHomepage(event.target.value)}
+                    placeholder="https://example.com"
+                  />
+                </label>
+                <label className="skill-repo-form-label">
+                  <span>文档链接</span>
+                  <input
+                    type="text"
+                    value={mcpFormDocs}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormDocs(event.target.value)}
+                    placeholder="https://example.com/docs"
+                  />
+                </label>
+              </div>
+            ) : null}
 
             {mcpFormError ? <div className="mcp-form-error">{mcpFormError}</div> : null}
           </section>
@@ -3924,13 +4025,21 @@ function App() {
                 配置向导
               </button>
             </div>
-            <pre className="mcp-json-preview">{mcpSpecPreviewText}</pre>
+            <textarea
+              className="mcp-json-editor"
+              value={mcpFormConfig}
+              onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setMcpFormConfig(event.target.value)}
+              spellCheck={false}
+              rows={10}
+              placeholder={MCP_DEFAULT_CONFIG}
+            />
+            <button type="button" className="mcp-json-format-btn" onClick={onFormatMcpConfig}>
+              <Wrench className="mcp-json-format-icon" />
+              格式化
+            </button>
           </section>
 
           <section className="mcp-create-bottom-bar">
-            <button type="button" className="mcp-create-cancel-btn" onClick={() => closeMcpAddPage()}>
-              取消
-            </button>
             <button
               type="button"
               className="skill-repo-add-btn"
