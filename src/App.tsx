@@ -3282,48 +3282,50 @@ function App() {
           </main>
         </>
       ) : activeToolView === "skills" ? (
-        <main className="tools-pane-wrap">
-          <section className="skills-page-header">
-            <div className="skills-page-left">
-              <button
-                type="button"
-                className="skills-back-btn"
-                onClick={() => setActiveToolView("dashboard")}
-                title="返回账号列表"
-                aria-label="返回账号列表"
-              >
-                <ArrowLeft className="skills-back-icon" />
-              </button>
-              <h1 className="skills-inline-title">Skills 管理</h1>
-            </div>
-            <div className="skills-page-actions">
-              <button
-                type="button"
-                className="skills-head-action"
-                disabled={skillsLoading || skillsRefreshing}
-                onClick={() => void onRefreshSkillsCatalog()}
-                title={skillsRefreshing ? "Skills 刷新中..." : "刷新 Skills"}
-                aria-label={skillsRefreshing ? "Skills 刷新中" : "刷新 Skills"}
-              >
-                <RefreshCw className={`skills-head-action-icon ${skillsRefreshing ? "icon-spin" : ""}`} />
-                {skillsRefreshing ? "刷新中..." : "刷新"}
-              </button>
-              <button type="button" className="skills-head-action" onClick={() => void onSkillsInstallFromZip()}>
-                <FileArchive className="skills-head-action-icon" />
-                从 ZIP 安装
-              </button>
-              <button type="button" className="skills-head-action" onClick={() => void onSkillsImportExisting()}>
-                <Download className="skills-head-action-icon" />
-                导入已有
-              </button>
-              <button type="button" className="skills-head-action" onClick={() => void onSkillsDiscover()}>
-                <Search className="skills-head-action-icon" />
-                发现技能
-              </button>
-            </div>
-          </section>
+        <main className="tools-pane-wrap tools-pane-wrap-sticky-head">
+          <div className="tools-pane-sticky-head">
+            <section className="skills-page-header">
+              <div className="skills-page-left">
+                <button
+                  type="button"
+                  className="skills-back-btn"
+                  onClick={() => setActiveToolView("dashboard")}
+                  title="返回账号列表"
+                  aria-label="返回账号列表"
+                >
+                  <ArrowLeft className="skills-back-icon" />
+                </button>
+                <h1 className="skills-inline-title">Skills 管理</h1>
+              </div>
+              <div className="skills-page-actions">
+                <button
+                  type="button"
+                  className="skills-head-action"
+                  disabled={skillsLoading || skillsRefreshing}
+                  onClick={() => void onRefreshSkillsCatalog()}
+                  title={skillsRefreshing ? "Skills 刷新中..." : "刷新 Skills"}
+                  aria-label={skillsRefreshing ? "Skills 刷新中" : "刷新 Skills"}
+                >
+                  <RefreshCw className={`skills-head-action-icon ${skillsRefreshing ? "icon-spin" : ""}`} />
+                  {skillsRefreshing ? "刷新中..." : "刷新"}
+                </button>
+                <button type="button" className="skills-head-action" onClick={() => void onSkillsInstallFromZip()}>
+                  <FileArchive className="skills-head-action-icon" />
+                  从 ZIP 安装
+                </button>
+                <button type="button" className="skills-head-action" onClick={() => void onSkillsImportExisting()}>
+                  <Download className="skills-head-action-icon" />
+                  导入已有
+                </button>
+                <button type="button" className="skills-head-action" onClick={() => void onSkillsDiscover()}>
+                  <Search className="skills-head-action-icon" />
+                  发现技能
+                </button>
+              </div>
+            </section>
 
-          <section className="skills-inline-summary">{skillsSummaryText}</section>
+            <section className="skills-inline-summary">{skillsSummaryText}</section>
+          </div>
 
           {skillsError ? <section className="skills-inline-error">{skillsError}</section> : null}
 
