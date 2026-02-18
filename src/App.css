@@ -1425,48 +1425,116 @@ button {
   padding: 8px 10px;
 }
 
-.mcp-add-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 2080;
-  background: rgba(27, 43, 51, 0.28);
-  backdrop-filter: blur(1px);
+.mcp-create-view {
+  gap: 12px;
+}
+
+.mcp-create-card {
+  border-radius: 16px;
+}
+
+.mcp-type-chip-row {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.mcp-type-chip {
+  min-height: 34px;
+  border-radius: 12px;
+  border: 1px solid #e1e6eb;
+  background: #f3f5f8;
+  color: #6a737f;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 0 16px;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  padding: 20px;
 }
 
-.mcp-add-window {
-  width: min(860px, 96vw);
-  max-height: min(86vh, 820px);
-  overflow: auto;
-  box-shadow: 0 22px 52px rgba(31, 58, 72, 0.26);
+.mcp-type-chip.active {
+  border-color: #5db78a;
+  background: #57b782;
+  color: #ffffff;
 }
 
-.mcp-add-window-header {
+.mcp-required-mark {
+  display: inline-block;
+  margin-left: 6px;
+  color: #d26666;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.mcp-create-subtitle {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #486171;
+  font-weight: 600;
+}
+
+.mcp-json-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 12px;
 }
 
-.mcp-add-window-header h2 {
+.mcp-json-header h2 {
   margin: 0;
-  font-size: 31px;
-  line-height: 1.2;
-  color: #1f3542;
 }
 
-.mcp-add-window-close {
-  height: 32px;
+.mcp-json-guide-btn {
+  border: none;
+  background: transparent;
+  color: #4e89e2;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.mcp-json-guide-btn:hover {
+  color: #3b76ce;
+}
+
+.mcp-json-preview {
+  margin: 10px 0 0;
   border-radius: 10px;
+  border: 1px solid #d9e1e8;
+  background: #eef3fb;
+  color: #3e4f5d;
+  font-size: 14px;
+  line-height: 1.55;
+  padding: 12px;
+  min-height: 120px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mcp-create-bottom-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin-top: auto;
+  padding: 10px 0 0;
+  border-top: 1px solid #d8e2e8;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.mcp-create-cancel-btn {
+  height: 38px;
+  border-radius: 10px;
+  padding: 0 14px;
   border: 1px solid #ccd9e0;
   background: #ffffff;
   color: #2b4653;
-  padding: 0 12px;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   transition:
@@ -1475,7 +1543,7 @@ button {
     transform 0.16s ease;
 }
 
-.mcp-add-window-close:hover {
+.mcp-create-cancel-btn:hover:not(:disabled) {
   border-color: #b7ccd7;
   background: #f9fcff;
   transform: translateY(-1px);
@@ -2497,19 +2565,31 @@ button {
     width: 100%;
   }
 
-  .mcp-add-overlay {
-    padding: 10px;
-    align-items: flex-end;
+  .mcp-type-chip-row {
+    gap: 6px;
   }
 
-  .mcp-add-window {
-    width: 100%;
-    max-height: 92vh;
-    border-radius: 12px 12px 0 0;
+  .mcp-type-chip {
+    min-height: 32px;
+    padding: 0 12px;
+    font-size: 12px;
   }
 
-  .mcp-add-window-header h2 {
-    font-size: 24px;
+  .mcp-json-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .mcp-create-bottom-bar {
+    padding-top: 8px;
+    gap: 8px;
+  }
+
+  .mcp-create-cancel-btn,
+  .mcp-create-bottom-bar .skill-repo-add-btn {
+    flex: 1;
+    justify-content: center;
   }
 
   .top-bar {

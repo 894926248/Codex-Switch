@@ -201,7 +201,7 @@ type PostSwitchStrategy = "hook" | "restart_extension_host";
 type AppMode = "gpt" | "opencode";
 type ActiveProfileByMode = Record<AppMode, string | null>;
 type SkillTarget = "codex" | "opencode";
-type ToolView = "dashboard" | "skills" | "skillsDiscovery" | "skillsRepos" | "prompts" | "mcp";
+type ToolView = "dashboard" | "skills" | "skillsDiscovery" | "skillsRepos" | "prompts" | "mcp" | "mcpAdd";
 
 function formatCurrentErrorWithProfile(data: Pick<DashboardData, "activeProfile" | "profiles"> | null, raw?: string | null): string | null {
   if (!raw) {
@@ -858,7 +858,6 @@ function App() {
   const [mcpManageRefreshing, setMcpManageRefreshing] = useState(false);
   const [mcpManageError, setMcpManageError] = useState<string | null>(null);
   const [mcpBusyIds, setMcpBusyIds] = useState<Record<string, boolean>>({});
-  const [mcpAddOpen, setMcpAddOpen] = useState(false);
   const [mcpFormId, setMcpFormId] = useState("");
   const [mcpFormType, setMcpFormType] = useState<"stdio" | "sse" | "http">("stdio");
   const [mcpFormCommand, setMcpFormCommand] = useState("npx");
@@ -1019,13 +1018,13 @@ function App() {
     setMcpFormError(null);
   }, []);
 
-  const openMcpAddDialog = useCallback(() => {
+  const openMcpAddPage = useCallback(() => {
     resetMcpAddForm();
-    setMcpAddOpen(true);
+    setActiveToolView("mcpAdd");
   }, [resetMcpAddForm]);
 
-  const closeMcpAddDialog = useCallback(() => {
-    setMcpAddOpen(false);
+  const closeMcpAddPage = useCallback(() => {
+    setActiveToolView("mcp");
     setMcpFormError(null);
   }, []);
 
@@ -1107,8 +1106,8 @@ function App() {
       });
       setMcpManage(recomputeMcpManage(data));
       setMcpManageError(null);
-      setMcpAddOpen(false);
       resetMcpAddForm();
+      setActiveToolView("mcp");
       setStatusText(`已添加 MCP: ${id}`);
     } catch (err) {
       setMcpFormError(`添加 MCP 失败: ${String(err)}`);
@@ -1509,6 +1508,37 @@ function App() {
 
   const mcpSyncingEmpty =
     mcpManageRefreshing && !mcpManageLoading && (mcpManage?.servers.length ?? 0) === 0;
+
+  const mcpSpecPreviewText = useMemo(() => {
+    const spec: Record<string, unknown> = { type: mcpFormType };
+    if (mcpFormType === "stdio") {
+      const command = mcpFormCommand.trim();
+      if (command) {
+        spec.command = command;
+      }
+      const args = parseMcpArgsInput(mcpFormArgs);
+      if (args.length > 0) {
+        spec.args = args;
+      }
+      const envText = mcpFormEnv.trim();
+      if (envText && envText !== "{}") {
+        try {
+          const parsedEnv = JSON.parse(envText);
+          if (parsedEnv && typeof parsedEnv === "object" && !Array.isArray(parsedEnv)) {
+            spec.env = parsedEnv as Record<string, unknown>;
+          }
+        } catch {
+          // keep preview stable while user edits invalid JSON
+        }
+      }
+    } else {
+      const url = mcpFormUrl.trim();
+      if (url) {
+        spec.url = url;
+      }
+    }
+    return JSON.stringify(spec, null, 2);
+  }, [mcpFormType, mcpFormCommand, mcpFormArgs, mcpFormEnv, mcpFormUrl, parseMcpArgsInput]);
 
   useEffect(() => {
     if (activeToolView !== "skills") {
@@ -3664,10 +3694,10 @@ function App() {
                   type="button"
                   className="skills-head-action"
                   disabled={mcpManageRefreshing}
-                  onClick={() => openMcpAddDialog()}
+                  onClick={() => openMcpAddPage()}
                 >
                   <Plus className="skills-head-action-icon" />
-                  添加MCP
+                  新增MCP
                 </button>
               </div>
             </section>
@@ -3753,53 +3783,52 @@ function App() {
             </section>
           )}
         </main>
-      ) : (
-        <main className="tools-pane-wrap">
-          <section className="tools-view-header">
-            <div className="tools-view-left">
+      ) : activeToolView === "mcpAdd" ? (
+        <main className="tools-pane-wrap mcp-create-view">
+          <section className="skills-page-header">
+            <div className="skills-page-left">
               <button
                 type="button"
                 className="skills-back-btn"
-                onClick={() => setActiveToolView("dashboard")}
-                title="返回账号列表"
-                aria-label="返回账号列表"
+                onClick={() => closeMcpAddPage()}
+                title="返回 MCP 管理"
+                aria-label="返回 MCP 管理"
               >
                 <ArrowLeft className="skills-back-icon" />
               </button>
-              <h1 className="skills-inline-title">Prompts 面板</h1>
+              <h1 className="skills-inline-title">新增 MCP</h1>
             </div>
           </section>
-          <section className="tools-placeholder-panel">
-            <h2>Prompts</h2>
-            <p>按钮已接入为 CC Switch 同款三按钮结构。Prompts 内容后续可继续扩展。</p>
-          </section>
-        </main>
-      )}
 
-      {activeToolView === "mcp" && mcpAddOpen ? (
-        <div
-          className="mcp-add-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-label="添加 MCP 服务器"
-          onClick={() => closeMcpAddDialog()}
-        >
-          <section className="skill-repo-form-panel mcp-form-panel mcp-add-window" onClick={(event) => event.stopPropagation()}>
-            <header className="mcp-add-window-header">
-              <h2>添加 MCP 服务器</h2>
-              <button type="button" className="mcp-add-window-close" onClick={() => closeMcpAddDialog()}>
-                关闭
-              </button>
-            </header>
+          <section className="skill-repo-form-panel mcp-create-card">
+            <h2>选择 MCP 类型</h2>
+            <div className="mcp-type-chip-row">
+              <span className="mcp-type-chip active">自定义</span>
+              <span className="mcp-type-chip">fetch</span>
+              <span className="mcp-type-chip">time</span>
+              <span className="mcp-type-chip">memory</span>
+              <span className="mcp-type-chip">sequential-thinking</span>
+              <span className="mcp-type-chip">context7</span>
+            </div>
+
             <label className="skill-repo-form-label">
-              <span>MCP ID</span>
+              <span>
+                MCP 标题（唯一）
+                <em className="mcp-required-mark">*</em>
+              </span>
               <input
                 type="text"
                 value={mcpFormId}
                 onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormId(event.target.value)}
-                placeholder="例如: context7"
+                placeholder="my-mcp-server"
               />
             </label>
+
+            <label className="skill-repo-form-label">
+              <span>显示名称</span>
+              <input type="text" value={mcpFormId} readOnly placeholder="例如 @modelcontextprotocol/server-time" />
+            </label>
+
             <label className="skill-repo-form-label">
               <span>类型</span>
               <div className="skills-discovery-select-wrap mcp-form-select-wrap">
@@ -3859,6 +3888,7 @@ function App() {
               </label>
             )}
 
+            <div className="mcp-create-subtitle">启用到应用</div>
             <div className="mcp-form-targets">
               <label className="mcp-form-target">
                 <input
@@ -3881,7 +3911,26 @@ function App() {
             </div>
 
             {mcpFormError ? <div className="mcp-form-error">{mcpFormError}</div> : null}
+          </section>
 
+          <section className="skill-repo-form-panel mcp-create-card">
+            <div className="mcp-json-header">
+              <h2>完整的 JSON 配置</h2>
+              <button
+                type="button"
+                className="mcp-json-guide-btn"
+                onClick={() => setStatusText("当前已使用表单自动生成 JSON 配置。")}
+              >
+                配置向导
+              </button>
+            </div>
+            <pre className="mcp-json-preview">{mcpSpecPreviewText}</pre>
+          </section>
+
+          <section className="mcp-create-bottom-bar">
+            <button type="button" className="mcp-create-cancel-btn" onClick={() => closeMcpAddPage()}>
+              取消
+            </button>
             <button
               type="button"
               className="skill-repo-add-btn"
@@ -3889,11 +3938,32 @@ function App() {
               onClick={() => void onSubmitMcpAdd()}
             >
               <Plus className="skill-repo-add-icon" />
-              {mcpBusyIds.__add__ ? "添加中..." : "添加MCP"}
+              {mcpBusyIds.__add__ ? "添加中..." : "添加"}
             </button>
           </section>
-        </div>
-      ) : null}
+        </main>
+      ) : (
+        <main className="tools-pane-wrap">
+          <section className="tools-view-header">
+            <div className="tools-view-left">
+              <button
+                type="button"
+                className="skills-back-btn"
+                onClick={() => setActiveToolView("dashboard")}
+                title="返回账号列表"
+                aria-label="返回账号列表"
+              >
+                <ArrowLeft className="skills-back-icon" />
+              </button>
+              <h1 className="skills-inline-title">Prompts 面板</h1>
+            </div>
+          </section>
+          <section className="tools-placeholder-panel">
+            <h2>Prompts</h2>
+            <p>按钮已接入为 CC Switch 同款三按钮结构。Prompts 内容后续可继续扩展。</p>
+          </section>
+        </main>
+      )}
 
       <footer className="status-bar">
         <span className="status-listener-group">
