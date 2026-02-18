@@ -96,6 +96,75 @@ button {
   color: #607683;
 }
 
+.close-choice-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2250;
+  background: rgba(22, 37, 45, 0.34);
+  backdrop-filter: blur(1px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.close-choice-dialog {
+  width: min(440px, 94vw);
+  border-radius: 14px;
+  border: 1px solid #d0dde3;
+  background: #ffffff;
+  box-shadow: 0 22px 54px rgba(26, 48, 59, 0.28);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.close-choice-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.close-choice-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #183140;
+}
+
+.close-choice-close {
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+}
+
+.close-choice-desc {
+  font-size: 13px;
+  color: #57707d;
+}
+
+.close-choice-remember {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #48616d;
+  user-select: none;
+}
+
+.close-choice-remember input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: #4f8ce6;
+}
+
+.close-choice-actions {
+  margin-top: 2px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .settings-overlay {
   position: absolute;
   inset: 0;
@@ -2224,6 +2293,28 @@ button {
   font-size: 13px;
 }
 
+.meta-querying {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #35505e;
+  font-weight: 600;
+}
+
+.meta-error {
+  color: #b24545;
+  font-weight: 600;
+}
+
+.meta-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid #c6d5dd;
+  border-top-color: #43b981;
+  animation: spin 0.9s linear infinite;
+}
+
 .card-side {
   display: flex;
   flex-direction: column;
@@ -2332,6 +2423,12 @@ button {
   height: 28px;
   font-size: 14px;
   line-height: 1;
+}
+
+.mini-icon.mini-icon-querying {
+  border-color: #a8c8b7;
+  background: #eff8f3;
+  color: #1f6c4b;
 }
 
 .action-rail {

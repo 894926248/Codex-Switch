@@ -10,6 +10,12 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/icon.ico",
+      "tooltip": "Codex Switch",
+      "showMenuOnLeftClick": false
+    },
     "windows": [
       {
         "title": "Codex Switch",

@@ -24,6 +24,8 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use tar::{Archive, Builder, Header};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 use toml_edit::{
@@ -58,6 +60,10 @@ const BACKUP_FORMAT_NAME: &str = "codex-switch-backup";
 const BACKUP_SCHEMA_VERSION: u32 = 1;
 const BACKUP_SWITCHER_PREFIX: &str = "switcher";
 const BACKUP_CODEX_PREFIX: &str = "codex";
+const MAIN_WINDOW_LABEL: &str = "main";
+const TRAY_ICON_ID: &str = "main";
+const TRAY_MENU_SHOW_ID: &str = "tray_show_main_window";
+const TRAY_MENU_EXIT_ID: &str = "tray_exit_app";
 const PROFILE_SUPPORT_GPT_KEY: &str = "gpt";
 const PROFILE_SUPPORT_OPENCODE_KEY: &str = "opencode";
 const OPENCODE_PROVIDER_ID: &str = "openai";
@@ -192,8 +198,10 @@ const AUTH_ERROR_KEYWORDS: [&str; 9] = [
     "401",
     "403",
 ];
-const HARD_QUOTA_ERROR_KEYWORDS: [&str; 8] = [
+const HARD_QUOTA_ERROR_KEYWORDS: [&str; 10] = [
     "usage_limit_exceeded",
+    "usage limit has been reached",
+    "usage limit",
     "insufficient_quota",
     "rate_limit_exceeded",
     "rate limit",
@@ -213,9 +221,19 @@ const AUTO_SWITCH_SESSION_SCAN_INTERVAL_MS: i64 = 3_000;
 const AUTO_SWITCH_SESSION_QUOTA_MAX_AGE_MS: i64 = 120_000;
 const AUTO_SWITCH_CODEX_LOG_SCAN_INTERVAL_MS: i64 = 3_000;
 const AUTO_SWITCH_OPENCODE_LOG_SCAN_INTERVAL_MS: i64 = 3_000;
+const AUTO_SWITCH_LIVE_QUOTA_SYNC_INTERVAL_MS: i64 = 2_500;
+const AUTO_SWITCH_LIVE_QUOTA_ERROR_COOLDOWN_MS: i64 = 12_000;
+const AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS: u64 = 8;
+const AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS: u64 = 3;
 const OPENCODE_LOG_RECENT_WINDOW_MS: i64 = 120_000;
-const CURRENT_QUOTA_CACHE_FRESH_MS: i64 = 15_000;
+const CURRENT_QUOTA_CACHE_FRESH_MS: i64 = 500;
 const CURRENT_QUOTA_CACHE_MAX_AGE_MS: i64 = 30 * 60 * 1000;
+const CURRENT_QUOTA_ERROR_COOLDOWN_MS: i64 = 8_000;
+const LIVE_QUOTA_STORE_SYNC_INTERVAL_MS: i64 = 5_000;
+const APP_SERVER_TIMEOUT_DEFAULT_SECONDS: u64 = 14;
+const APP_SERVER_TIMEOUT_POLL_SECONDS: u64 = 3;
+const APP_SERVER_OPENCODE_POLL_TIMEOUT_SECONDS: u64 = 8;
+const APP_SERVER_DEBUG_ENV: &str = "CODEX_SWITCH_APP_SERVER_LOG";
 const AUTO_SWITCH_THREAD_RECOVER_COOLDOWN_MS: i64 = 5_000;
 const AUTO_SWITCH_THREAD_RECOVER_HARD_COOLDOWN_MS: i64 = 12_000;
 const AUTO_SWITCH_NEW_CHAT_RESET_COOLDOWN_MS: i64 = 30_000;
@@ -297,6 +315,11 @@ struct CurrentQuotaRuntimeCache {
 }
 
 static CURRENT_QUOTA_RUNTIME_CACHE: OnceLock<Mutex<CurrentQuotaRuntimeCache>> = OnceLock::new();
+static OPENCODE_CURRENT_QUOTA_RUNTIME_CACHE: OnceLock<Mutex<CurrentQuotaRuntimeCache>> =
+    OnceLock::new();
+static OPENCODE_QUOTA_BRIDGE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static APP_RUNTIME_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+static LIVE_QUOTA_STORE_SYNC_STATE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoreData {
@@ -356,7 +379,9 @@ struct DashboardData {
     app_name: String,
     active_profile: Option<String>,
     current: Option<CurrentStatusView>,
+    opencode_current: Option<CurrentStatusView>,
     current_error: Option<String>,
+    current_error_mode: Option<String>,
     last_keepalive_at: Option<i64>,
     profiles: Vec<ProfileView>,
 }
@@ -403,6 +428,8 @@ struct CodexExtensionInfoView {
 #[serde(rename_all = "camelCase")]
 struct OpenCodeMonitorStatusView {
     auth_ready: bool,
+    running: bool,
+    process_count: u64,
     log_ready: bool,
     log_recent: bool,
     last_log_age_ms: Option<i64>,
@@ -658,6 +685,8 @@ enum AutoSwitchMode {
 struct SessionQuotaSnapshot {
     five_hour_remaining_percent: Option<i64>,
     one_week_remaining_percent: Option<i64>,
+    five_hour_resets_at: Option<i64>,
+    one_week_resets_at: Option<i64>,
     updated_at_ms: Option<i64>,
 }
 
@@ -768,11 +797,12 @@ struct AutoSwitchRuntime {
     thread_recover_cooldown_until_ms: i64,
     state_index_purge_cooldown_until_ms: i64,
     last_switch_applied_at_ms: i64,
+    last_live_quota_sync_at_ms: i64,
 }
 
 #[derive(Debug, Default)]
 struct AutoSwitchRuntimeState {
-    inner: Mutex<AutoSwitchRuntime>,
+    inner: Arc<Mutex<AutoSwitchRuntime>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4018,6 +4048,49 @@ fn now_iso() -> String {
     Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
+fn app_server_debug_enabled() -> bool {
+    match env::var(APP_SERVER_DEBUG_ENV) {
+        Ok(value) => {
+            let lowered = value.trim().to_lowercase();
+            !matches!(lowered.as_str(), "0" | "false" | "off" | "no")
+        }
+        Err(_) => true,
+    }
+}
+
+fn app_server_log(enabled: bool, message: impl AsRef<str>) {
+    let text = message.as_ref();
+    if enabled {
+        eprintln!("[codex-switch][app-server] {text}");
+    }
+    if let Some(app) = APP_RUNTIME_HANDLE.get() {
+        let payload = json!({
+            "message": text,
+            "ts": now_iso(),
+        });
+        let _ = app.emit("codex-switch://app-server-log", payload);
+    }
+}
+
+fn redact_app_server_request_for_log(req: &Value) -> String {
+    let mut sanitized = req.clone();
+    if let Some(method) = sanitized.get("method").and_then(Value::as_str) {
+        if method == "account/login/start" {
+            if let Some(params) = sanitized.get_mut("params").and_then(Value::as_object_mut) {
+                if params.get("type").and_then(Value::as_str) == Some("chatgptAuthTokens") {
+                    if params.contains_key("accessToken") {
+                        params.insert(
+                            "accessToken".to_string(),
+                            Value::String("<redacted>".to_string()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_string(&sanitized).unwrap_or_else(|_| "<invalid-json>".to_string())
+}
+
 fn dedupe_push_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: PathBuf) {
     let key = path.to_string_lossy().to_lowercase();
     if key.is_empty() || seen.contains(&key) {
@@ -4077,11 +4150,77 @@ fn candidate_codex_paths() -> Vec<PathBuf> {
 }
 
 fn resolve_codex_binary() -> CmdResult<PathBuf> {
-    let candidates = candidate_codex_paths();
-    for candidate in &candidates {
-        if candidate.exists() {
-            return Ok(candidate.clone());
+    if let Some(bin) = env::var_os("CODEX_BIN") {
+        let path = PathBuf::from(bin);
+        if path.exists() {
+            let ext = path
+                .extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "ps1" {
+                let mut alternatives: Vec<PathBuf> = Vec::new();
+                alternatives.push(path.with_extension("cmd"));
+                alternatives.push(path.with_extension("exe"));
+                alternatives.push(path.with_extension("bat"));
+                if let Some(parent) = path.parent() {
+                    alternatives.push(parent.join("codex.cmd"));
+                    alternatives.push(parent.join("codex.exe"));
+                }
+                for alt in alternatives {
+                    if alt.exists() {
+                        return Ok(alt);
+                    }
+                }
+            }
+            return Ok(path);
         }
+    }
+
+    let candidates = candidate_codex_paths();
+    let score_path = |path: &Path| -> i32 {
+        let ext = path
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let mut score = match ext.as_str() {
+            "exe" => 0,
+            "cmd" => 1,
+            "bat" => 2,
+            "" => 3,
+            "ps1" => 8,
+            _ => 4,
+        };
+        let lower = path.to_string_lossy().to_ascii_lowercase();
+        if lower.contains("\\appdata\\roaming\\npm\\") {
+            score -= 2;
+        }
+        if lower.contains("\\.vscode\\extensions\\openai.chatgpt-")
+            || lower.contains("\\.cursor\\extensions\\openai.chatgpt-")
+            || lower.contains("\\.windsurf\\extensions\\openai.chatgpt-")
+        {
+            score += 8;
+        }
+        if lower.contains("\\windowsapps\\") {
+            score += 10;
+        }
+        score
+    };
+
+    let mut best: Option<(i32, usize, PathBuf)> = None;
+    for (idx, candidate) in candidates.iter().enumerate() {
+        if !candidate.exists() {
+            continue;
+        }
+        let score = score_path(candidate);
+        match &best {
+            Some((best_score, best_idx, _)) if (*best_score, *best_idx) <= (score, idx) => {}
+            _ => best = Some((score, idx, candidate.clone())),
+        }
+    }
+    if let Some((_, _, path)) = best {
+        return Ok(path);
     }
     let preview: Vec<String> = candidates
         .iter()
@@ -5869,7 +6008,21 @@ fn app_server_request(
     codex_home: &Path,
     requests: &[Value],
     timeout_seconds: u64,
+    required_ids: &[i64],
 ) -> CmdResult<HashMap<i64, Value>> {
+    let debug_enabled = app_server_debug_enabled();
+    if let Ok(bin) = resolve_codex_binary() {
+        app_server_log(debug_enabled, format!("using codex binary: {}", bin.display()));
+    }
+    app_server_log(
+        debug_enabled,
+        format!(
+            "spawn codex app-server (CODEX_HOME={}, timeout={}s, requests={})",
+            codex_home.display(),
+            timeout_seconds,
+            requests.len()
+        ),
+    );
     let mut cmd = build_codex_command(&["app-server"])?;
     let mut child = cmd
         .env("CODEX_HOME", codex_home)
@@ -5886,6 +6039,8 @@ fn app_server_request(
             .ok_or_else(|| "app-server stdin 不可用。".to_string())?;
         for req in requests {
             let line = serde_json::to_string(req).map_err(|e| format!("请求序列化失败: {e}"))?;
+            let safe_line = redact_app_server_request_for_log(req);
+            app_server_log(debug_enabled, format!("stdin >> {safe_line}"));
             stdin
                 .write_all(format!("{line}\n").as_bytes())
                 .map_err(|e| format!("向 app-server 写入请求失败: {e}"))?;
@@ -5899,22 +6054,64 @@ fn app_server_request(
         .stdout
         .take()
         .ok_or_else(|| "app-server stdout 不可用。".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "app-server stderr 不可用。".to_string())?;
     let (tx, rx) = mpsc::channel::<String>();
+    let stdout_log_enabled = debug_enabled;
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
+            app_server_log(stdout_log_enabled, format!("stdout << {line}"));
             let _ = tx.send(line);
         }
+        app_server_log(stdout_log_enabled, "stdout stream closed");
     });
+    let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let stderr_tail_worker = Arc::clone(&stderr_tail);
+        let stderr_log_enabled = debug_enabled;
+        thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                app_server_log(stderr_log_enabled, format!("stderr << {line}"));
+                if let Ok(mut tail) = stderr_tail_worker.lock() {
+                    if tail.len() >= 8 {
+                        tail.remove(0);
+                    }
+                    tail.push(line);
+                }
+            }
+            app_server_log(stderr_log_enabled, "stderr stream closed");
+        });
+    }
 
     let wanted_ids: HashSet<i64> = requests
         .iter()
         .filter_map(|req| req.get("id").and_then(Value::as_i64))
         .collect();
+    let mut required: HashSet<i64> = if required_ids.is_empty() {
+        wanted_ids.clone()
+    } else {
+        required_ids
+            .iter()
+            .copied()
+            .filter(|id| wanted_ids.contains(id))
+            .collect()
+    };
+    if required.is_empty() {
+        required = wanted_ids.clone();
+    }
     let mut got: HashMap<i64, Value> = HashMap::new();
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    app_server_log(
+        debug_enabled,
+        format!("waiting responses, required_ids={required:?}"),
+    );
 
-    while Instant::now() < deadline && got.len() < wanted_ids.len() {
+    let mut required_done = false;
+    while Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(300)) {
             Ok(line) => {
                 let Ok(msg) = serde_json::from_str::<Value>(&line) else {
@@ -5927,53 +6124,122 @@ fn app_server_request(
                     continue;
                 }
                 if let Some(error) = msg.get("error") {
+                    if !required.contains(&msg_id) {
+                        app_server_log(
+                            debug_enabled,
+                            format!("optional id={msg_id} returned error: {error}"),
+                        );
+                        got.insert(msg_id, msg);
+                        continue;
+                    }
+                    app_server_log(
+                        debug_enabled,
+                        format!("required id={msg_id} returned error: {error}"),
+                    );
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(format!("app-server 请求 {msg_id} 返回错误: {error}"));
                 }
+                app_server_log(debug_enabled, format!("received response id={msg_id}"));
                 got.insert(msg_id, msg);
+                required_done = required.iter().all(|id| got.contains_key(id));
+                if required_done {
+                    app_server_log(debug_enabled, "required responses all received");
+                    break;
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                app_server_log(debug_enabled, "stdout channel disconnected");
+                break;
+            }
+        }
+    }
+
+    if required_done && got.len() < wanted_ids.len() {
+        let grace_deadline = Instant::now() + Duration::from_millis(220);
+        while Instant::now() < grace_deadline {
+            match rx.recv_timeout(Duration::from_millis(70)) {
+                Ok(line) => {
+                    let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    let Some(msg_id) = msg.get("id").and_then(Value::as_i64) else {
+                        continue;
+                    };
+                    if !wanted_ids.contains(&msg_id) {
+                        continue;
+                    }
+                    got.insert(msg_id, msg);
+                    if got.len() >= wanted_ids.len() {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
         }
     }
 
     let _ = child.kill();
     let _ = child.wait();
+    let mut got_ids: Vec<i64> = got.keys().copied().collect();
+    got_ids.sort_unstable();
+    app_server_log(debug_enabled, format!("finished, got_ids={got_ids:?}"));
+
+    let mut missing_required: Vec<i64> = required
+        .into_iter()
+        .filter(|id| !got.contains_key(id))
+        .collect();
+    if !missing_required.is_empty() {
+        missing_required.sort_unstable();
+        let stderr_note = stderr_tail
+            .lock()
+            .ok()
+            .and_then(|tail| {
+                if tail.is_empty() {
+                    None
+                } else {
+                    Some(tail.join(" | "))
+                }
+            })
+            .unwrap_or_default();
+        if stderr_note.is_empty() {
+            return Err(format!(
+                "app-server 响应超时，缺少必需 id: {missing_required:?}"
+            ));
+        }
+        return Err(format!(
+            "app-server 响应超时，缺少必需 id: {missing_required:?}；stderr: {stderr_note}"
+        ));
+    }
 
     if got.len() != wanted_ids.len() {
-        let mut missing: Vec<i64> = wanted_ids
+        let mut missing_optional: Vec<i64> = wanted_ids
             .into_iter()
             .filter(|id| !got.contains_key(id))
             .collect();
-        missing.sort_unstable();
-        return Err(format!("app-server 响应超时，缺少 id: {missing:?}"));
+        missing_optional.sort_unstable();
+        app_server_log(
+            debug_enabled,
+            format!(
+                "app-server 未返回可选响应 id: {:?} (CODEX_HOME={})",
+                missing_optional,
+                codex_home.display()
+            ),
+        );
     }
     Ok(got)
 }
 
-fn fetch_quota_from_codex_home(codex_home: &Path, refresh_token: bool) -> CmdResult<AccountQuota> {
-    let requests = vec![
-        json!({
-            "id": 1,
-            "method": "initialize",
-            "params": {"clientInfo": {"name": "codex-switch", "version": "1.0.0"}}
-        }),
-        json!({
-            "id": 2,
-            "method": "account/read",
-            "params": {"refreshToken": refresh_token}
-        }),
-        json!({
-            "id": 3,
-            "method": "account/rateLimits/read",
-            "params": Value::Null
-        }),
-    ];
-
-    let responses = app_server_request(codex_home, &requests, 14)?;
+fn account_quota_from_app_server_responses(
+    codex_home: &Path,
+    responses: &HashMap<i64, Value>,
+    account_msg_id: i64,
+    rate_limits_msg_id: i64,
+) -> CmdResult<AccountQuota> {
     let account = responses
-        .get(&2)
+        .get(&account_msg_id)
         .and_then(|v| v.get("result"))
         .and_then(|v| v.get("account"))
         .and_then(Value::as_object)
@@ -5992,10 +6258,10 @@ fn fetch_quota_from_codex_home(codex_home: &Path, refresh_token: bool) -> CmdRes
         read_workspace_info_from_auth_file(&codex_home.join(AUTH_FILE_NAME));
 
     let result = responses
-        .get(&3)
+        .get(&rate_limits_msg_id)
         .and_then(|v| v.get("result"))
         .cloned()
-        .unwrap_or(Value::Null);
+        .ok_or_else(|| "未在 app-server 响应中找到额度信息。".to_string())?;
 
     let mut snapshot: Option<Value> = None;
     if let Some(by_limit) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {
@@ -6037,6 +6303,41 @@ fn fetch_quota_from_codex_home(codex_home: &Path, refresh_token: bool) -> CmdRes
         five_hour,
         one_week,
     })
+}
+
+fn fetch_quota_from_codex_home_with_timeout(
+    codex_home: &Path,
+    refresh_token: bool,
+    timeout_seconds: u64,
+) -> CmdResult<AccountQuota> {
+    let requests = vec![
+        json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "codex-switch", "version": "1.0.0"}}
+        }),
+        json!({
+            "id": 2,
+            "method": "account/read",
+            "params": {"refreshToken": refresh_token}
+        }),
+        json!({
+            "id": 3,
+            "method": "account/rateLimits/read",
+            "params": Value::Null
+        }),
+    ];
+
+    let responses = app_server_request(codex_home, &requests, timeout_seconds, &[1, 2, 3])?;
+    account_quota_from_app_server_responses(codex_home, &responses, 2, 3)
+}
+
+fn fetch_quota_from_codex_home(codex_home: &Path, refresh_token: bool) -> CmdResult<AccountQuota> {
+    fetch_quota_from_codex_home_with_timeout(
+        codex_home,
+        refresh_token,
+        APP_SERVER_TIMEOUT_DEFAULT_SECONDS,
+    )
 }
 
 fn extract_opencode_account_id_from_jwt(token: &str) -> Option<String> {
@@ -6199,10 +6500,137 @@ fn opencode_workspace_id_from_openai_entry(entry: &Value) -> Option<String> {
     None
 }
 
+fn opencode_plan_type_from_access_token(token: &str) -> Option<String> {
+    let decoded = decode_jwt_payload(token)?;
+    let root = decoded.as_object()?;
+    let auth_claim = root
+        .get("https://api.openai.com/auth")
+        .and_then(Value::as_object)?;
+    read_non_empty_string(auth_claim, &["chatgpt_plan_type", "chatgptPlanType", "plan_type"])
+}
+
+fn opencode_plan_type_from_openai_entry(entry: &Map<String, Value>) -> Option<String> {
+    read_non_empty_string(entry, &["planType", "plan_type"]).or_else(|| {
+        read_non_empty_string(entry, &["access", "access_token", "accessToken"])
+            .and_then(|token| opencode_plan_type_from_access_token(&token))
+    })
+}
+
 fn live_opencode_workspace_id_internal() -> Option<String> {
     let auth_path = opencode_auth_file().ok()?;
     let entry = read_openai_entry_from_opencode_auth_file(&auth_path)?;
     opencode_workspace_id_from_openai_entry(&entry)
+}
+
+fn opencode_quota_bridge_home() -> CmdResult<PathBuf> {
+    Ok(switcher_home()?.join("runtime").join("opencode_live_codex_home"))
+}
+
+fn write_codex_auth_from_opencode_entry(
+    codex_home_dir: &Path,
+    openai_entry: &Map<String, Value>,
+) -> CmdResult<()> {
+    let access = read_non_empty_string(openai_entry, &["access", "access_token", "accessToken"])
+        .ok_or_else(|| "OpenCode auth 缺少 access token。".to_string())?;
+    let refresh = read_non_empty_string(openai_entry, &["refresh", "refresh_token", "refreshToken"])
+        .ok_or_else(|| "OpenCode auth 缺少 refresh token。".to_string())?;
+    let account_id = read_non_empty_string(
+        openai_entry,
+        &["accountId", "account_id", "workspace_id", "workspaceId"],
+    );
+
+    let mut tokens = Map::new();
+    tokens.insert("id_token".to_string(), Value::String(access.clone()));
+    tokens.insert("access_token".to_string(), Value::String(access));
+    tokens.insert("refresh_token".to_string(), Value::String(refresh));
+    if let Some(id) = account_id {
+        tokens.insert("account_id".to_string(), Value::String(id));
+    }
+
+    let mut root = Map::new();
+    root.insert("auth_mode".to_string(), Value::String("chatgpt".to_string()));
+    root.insert("OPENAI_API_KEY".to_string(), Value::Null);
+    root.insert("tokens".to_string(), Value::Object(tokens));
+    root.insert(
+        "last_refresh".to_string(),
+        Value::Number(serde_json::Number::from(Utc::now().timestamp())),
+    );
+
+    fs::create_dir_all(codex_home_dir)
+        .map_err(|e| format!("创建 OpenCode 配额桥接目录失败: {e}"))?;
+    let auth_path = codex_home_dir.join(AUTH_FILE_NAME);
+    let text = serde_json::to_string_pretty(&Value::Object(root))
+        .map_err(|e| format!("序列化 OpenCode 桥接 auth.json 失败: {e}"))?;
+    fs::write(&auth_path, format!("{text}\n"))
+        .map_err(|e| format!("写入 OpenCode 桥接 auth.json 失败 {}: {e}", auth_path.display()))
+}
+
+fn fetch_quota_from_live_opencode_auth_with_timeout(timeout_seconds: u64) -> CmdResult<AccountQuota> {
+    let auth_path = opencode_auth_file()?;
+    let entry = read_openai_entry_from_opencode_auth_file(&auth_path)
+        .ok_or_else(|| "OpenCode 未登录或缺少 openai 登录态。".to_string())?;
+    let openai_entry = entry
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "OpenCode openai 登录态格式无效。".to_string())?;
+    let access_token =
+        read_non_empty_string(&openai_entry, &["access", "access_token", "accessToken"])
+            .ok_or_else(|| "OpenCode auth 缺少 access token。".to_string())?;
+    let workspace_id = opencode_workspace_id_from_openai_entry(&entry)
+        .or_else(|| extract_opencode_account_id_from_jwt(&access_token))
+        .ok_or_else(|| "OpenCode auth 缺少 accountId/workspaceId。".to_string())?;
+    let plan_type = opencode_plan_type_from_openai_entry(&openai_entry);
+
+    let _guard = opencode_quota_bridge_lock()
+        .lock()
+        .map_err(|_| "OpenCode 配额桥接锁获取失败。".to_string())?;
+    let bridge_home = opencode_quota_bridge_home()?;
+    fs::create_dir_all(&bridge_home)
+        .map_err(|e| format!("创建 OpenCode 配额桥接目录失败: {e}"))?;
+
+    let requests = vec![
+        json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "codex-switch", "version": "1.0.0"},
+                "capabilities": {"experimentalApi": true}
+            }
+        }),
+        json!({
+            "id": 10,
+            "method": "account/login/start",
+            "params": {
+                "type": "chatgptAuthTokens",
+                "accessToken": access_token,
+                "chatgptAccountId": workspace_id,
+                "chatgptPlanType": plan_type.clone().map(Value::String).unwrap_or(Value::Null)
+            }
+        }),
+        json!({
+            "id": 2,
+            "method": "account/read",
+            "params": {"refreshToken": false}
+        }),
+        json!({
+            "id": 3,
+            "method": "account/rateLimits/read",
+            "params": Value::Null
+        }),
+    ];
+    let responses = app_server_request(&bridge_home, &requests, timeout_seconds, &[1, 10, 2, 3])?;
+    let mut quota = account_quota_from_app_server_responses(&bridge_home, &responses, 2, 3)?;
+    if quota.workspace_id.as_deref().unwrap_or("").trim().is_empty() {
+        quota.workspace_id = Some(workspace_id);
+    }
+    if quota.plan_type.as_deref().unwrap_or("").trim().is_empty() {
+        quota.plan_type = plan_type;
+    }
+    Ok(quota)
+}
+
+fn fetch_quota_from_live_opencode_auth() -> CmdResult<AccountQuota> {
+    fetch_quota_from_live_opencode_auth_with_timeout(APP_SERVER_TIMEOUT_DEFAULT_SECONDS)
 }
 
 fn sync_opencode_snapshot_from_live_auth_best_effort(target_dir: &Path) {
@@ -7222,7 +7650,12 @@ fn build_auto_profile_base(quota: &AccountQuota) -> String {
     }
 }
 
-fn refresh_one_profile_quota(store: &mut StoreData, name: &str, refresh_token: bool) -> bool {
+fn refresh_one_profile_quota_with_timeout(
+    store: &mut StoreData,
+    name: &str,
+    refresh_token: bool,
+    timeout_seconds: u64,
+) -> bool {
     let Some(record_value) = store.profiles.get(name).cloned() else {
         return false;
     };
@@ -7251,7 +7684,7 @@ fn refresh_one_profile_quota(store: &mut StoreData, name: &str, refresh_token: b
         return false;
     }
 
-    match fetch_quota_from_codex_home(&snapshot_dir, refresh_token) {
+    match fetch_quota_from_codex_home_with_timeout(&snapshot_dir, refresh_token, timeout_seconds) {
         Ok(quota) => {
             record.insert(
                 "email".to_string(),
@@ -7293,6 +7726,15 @@ fn refresh_one_profile_quota(store: &mut StoreData, name: &str, refresh_token: b
             false
         }
     }
+}
+
+fn refresh_one_profile_quota(store: &mut StoreData, name: &str, refresh_token: bool) -> bool {
+    refresh_one_profile_quota_with_timeout(
+        store,
+        name,
+        refresh_token,
+        APP_SERVER_TIMEOUT_DEFAULT_SECONDS,
+    )
 }
 
 fn quota_fields_from_record(
@@ -7398,7 +7840,9 @@ fn build_profile_view(store: &StoreData, name: &str, record: &Map<String, Value>
 fn build_dashboard(
     store: &StoreData,
     current: Option<CurrentStatusView>,
+    opencode_current: Option<CurrentStatusView>,
     current_error: Option<String>,
+    current_error_mode: Option<String>,
 ) -> DashboardData {
     let mut profiles = Vec::new();
     for name in list_profile_names(store) {
@@ -7414,7 +7858,9 @@ fn build_dashboard(
         app_name: APP_NAME.to_string(),
         active_profile: store.active_profile.clone(),
         current,
+        opencode_current,
         current_error,
+        current_error_mode,
         last_keepalive_at: store.last_keepalive_at,
         profiles,
     }
@@ -7424,8 +7870,111 @@ fn current_quota_runtime_cache() -> &'static Mutex<CurrentQuotaRuntimeCache> {
     CURRENT_QUOTA_RUNTIME_CACHE.get_or_init(|| Mutex::new(CurrentQuotaRuntimeCache::default()))
 }
 
-fn cached_current_quota_snapshot(now_ms: i64) -> Option<(AccountQuota, i64)> {
-    let cache = current_quota_runtime_cache().lock().ok()?;
+fn opencode_current_quota_runtime_cache() -> &'static Mutex<CurrentQuotaRuntimeCache> {
+    OPENCODE_CURRENT_QUOTA_RUNTIME_CACHE
+        .get_or_init(|| Mutex::new(CurrentQuotaRuntimeCache::default()))
+}
+
+fn opencode_quota_bridge_lock() -> &'static Mutex<()> {
+    OPENCODE_QUOTA_BRIDGE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn live_quota_store_sync_state() -> &'static Mutex<HashMap<String, i64>> {
+    LIVE_QUOTA_STORE_SYNC_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn live_quota_store_sync_allowed(sync_key: &str, now_ms: i64, force: bool) -> bool {
+    if force {
+        return true;
+    }
+    let Ok(state) = live_quota_store_sync_state().lock() else {
+        return false;
+    };
+    let last_ms = state.get(sync_key).copied().unwrap_or(0);
+    now_ms.saturating_sub(last_ms) >= LIVE_QUOTA_STORE_SYNC_INTERVAL_MS
+}
+
+fn mark_live_quota_store_synced(sync_key: &str, now_ms: i64) {
+    if let Ok(mut state) = live_quota_store_sync_state().lock() {
+        state.insert(sync_key.to_string(), now_ms);
+    }
+}
+
+fn apply_quota_to_profile_record(record: &mut Map<String, Value>, quota: &AccountQuota) {
+    record.insert(
+        "email".to_string(),
+        quota.email.clone().map(Value::String).unwrap_or(Value::Null),
+    );
+    record.insert(
+        "workspace_name".to_string(),
+        quota
+            .workspace_name
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    record.insert(
+        "workspace_id".to_string(),
+        quota.workspace_id.clone().map(Value::String).unwrap_or(Value::Null),
+    );
+    record.insert(
+        "plan_type".to_string(),
+        quota.plan_type.clone().map(Value::String).unwrap_or(Value::Null),
+    );
+    let quota_value = json!({
+        "five_hour": quota.five_hour,
+        "one_week": quota.one_week
+    });
+    record.insert("quota".to_string(), quota_value);
+    record.insert("last_checked_at".to_string(), Value::String(now_iso()));
+    record.insert("last_error".to_string(), Value::Null);
+    record.insert("updated_at".to_string(), Value::String(now_iso()));
+}
+
+fn sync_live_quota_to_store(
+    store: &mut StoreData,
+    quota: &AccountQuota,
+    now_ms: i64,
+    mode: AutoSwitchMode,
+    force: bool,
+) {
+    let Some(profile_name) = find_profile_name_by_identity_prefer_existing(
+        store,
+        quota.workspace_id.as_deref(),
+        quota.email.as_deref(),
+    ) else {
+        return;
+    };
+    let sync_key = format!(
+        "{}:{}",
+        if matches!(mode, AutoSwitchMode::OpenCode) {
+            "opencode"
+        } else {
+            "gpt"
+        },
+        profile_name
+    );
+    if !live_quota_store_sync_allowed(&sync_key, now_ms, force) {
+        return;
+    }
+    let Some(record_value) = store.profiles.get(&profile_name).cloned() else {
+        return;
+    };
+    let mut record = record_value.as_object().cloned().unwrap_or_default();
+    apply_quota_to_profile_record(&mut record, quota);
+    store
+        .profiles
+        .insert(profile_name.clone(), Value::Object(record));
+    if save_store(store).is_ok() {
+        mark_live_quota_store_synced(&sync_key, now_ms);
+    }
+}
+
+fn cached_quota_snapshot_for_cache(
+    cache: &Mutex<CurrentQuotaRuntimeCache>,
+    now_ms: i64,
+) -> Option<(AccountQuota, i64)> {
+    let cache = cache.lock().ok()?;
     let quota = cache.quota.clone()?;
     if cache.fetched_at_ms <= 0 {
         return None;
@@ -7437,8 +7986,16 @@ fn cached_current_quota_snapshot(now_ms: i64) -> Option<(AccountQuota, i64)> {
     Some((quota, age_ms))
 }
 
-fn update_current_quota_runtime_cache(quota: &AccountQuota, now_ms: i64) {
-    if let Ok(mut cache) = current_quota_runtime_cache().lock() {
+fn cached_current_quota_snapshot(now_ms: i64) -> Option<(AccountQuota, i64)> {
+    cached_quota_snapshot_for_cache(current_quota_runtime_cache(), now_ms)
+}
+
+fn cached_opencode_quota_snapshot(now_ms: i64) -> Option<(AccountQuota, i64)> {
+    cached_quota_snapshot_for_cache(opencode_current_quota_runtime_cache(), now_ms)
+}
+
+fn update_quota_runtime_cache(cache: &Mutex<CurrentQuotaRuntimeCache>, quota: &AccountQuota, now_ms: i64) {
+    if let Ok(mut cache) = cache.lock() {
         cache.quota = Some(quota.clone());
         cache.fetched_at_ms = now_ms;
         cache.last_error = None;
@@ -7446,18 +8003,73 @@ fn update_current_quota_runtime_cache(quota: &AccountQuota, now_ms: i64) {
     }
 }
 
-fn mark_current_quota_runtime_error(err: &str, now_ms: i64) {
-    if let Ok(mut cache) = current_quota_runtime_cache().lock() {
+fn update_current_quota_runtime_cache(quota: &AccountQuota, now_ms: i64) {
+    update_quota_runtime_cache(current_quota_runtime_cache(), quota, now_ms);
+}
+
+fn update_opencode_quota_runtime_cache(quota: &AccountQuota, now_ms: i64) {
+    update_quota_runtime_cache(opencode_current_quota_runtime_cache(), quota, now_ms);
+}
+
+fn mark_quota_runtime_error(cache: &Mutex<CurrentQuotaRuntimeCache>, err: &str, now_ms: i64) {
+    if let Ok(mut cache) = cache.lock() {
         cache.last_error = Some(err.to_string());
         cache.last_error_at_ms = now_ms;
     }
 }
 
-fn cached_quota_matches_live_workspace(codex_home: &Path, quota: &AccountQuota) -> bool {
-    let (_, live_workspace_id) =
-        read_workspace_info_from_auth_file(&codex_home.join(AUTH_FILE_NAME));
-    let live = live_workspace_id
-        .as_deref()
+fn mark_current_quota_runtime_error(err: &str, now_ms: i64) {
+    mark_quota_runtime_error(current_quota_runtime_cache(), err, now_ms);
+}
+
+fn mark_opencode_quota_runtime_error(err: &str, now_ms: i64) {
+    mark_quota_runtime_error(opencode_current_quota_runtime_cache(), err, now_ms);
+}
+
+fn latest_quota_runtime_error(
+    cache: &Mutex<CurrentQuotaRuntimeCache>,
+    now_ms: i64,
+    max_age_ms: i64,
+) -> Option<String> {
+    let cache = cache.lock().ok()?;
+    let err = cache.last_error.clone()?;
+    if cache.last_error_at_ms <= 0 {
+        return None;
+    }
+    if now_ms.saturating_sub(cache.last_error_at_ms) > max_age_ms {
+        return None;
+    }
+    Some(err)
+}
+
+fn latest_opencode_quota_runtime_error(now_ms: i64, max_age_ms: i64) -> Option<String> {
+    latest_quota_runtime_error(opencode_current_quota_runtime_cache(), now_ms, max_age_ms)
+}
+
+fn quota_runtime_error_is_hot(
+    cache: &Mutex<CurrentQuotaRuntimeCache>,
+    now_ms: i64,
+    cooldown_ms: i64,
+) -> bool {
+    let Ok(cache) = cache.lock() else {
+        return false;
+    };
+    if cache.last_error_at_ms <= 0 {
+        return false;
+    }
+    now_ms.saturating_sub(cache.last_error_at_ms) < cooldown_ms
+}
+
+fn current_quota_runtime_error_is_hot(now_ms: i64, cooldown_ms: i64) -> bool {
+    quota_runtime_error_is_hot(current_quota_runtime_cache(), now_ms, cooldown_ms)
+}
+
+fn opencode_quota_runtime_error_is_hot(now_ms: i64, cooldown_ms: i64) -> bool {
+    quota_runtime_error_is_hot(opencode_current_quota_runtime_cache(), now_ms, cooldown_ms)
+}
+
+fn cached_quota_matches_workspace_id(quota: &AccountQuota, workspace_id: Option<&str>) -> bool {
+    let live = workspace_id
         .map(str::trim)
         .unwrap_or("")
         .to_string();
@@ -7471,6 +8083,12 @@ fn cached_quota_matches_live_workspace(codex_home: &Path, quota: &AccountQuota) 
         return true;
     }
     live.eq_ignore_ascii_case(&cached)
+}
+
+fn cached_quota_matches_live_workspace(codex_home: &Path, quota: &AccountQuota) -> bool {
+    let (_, live_workspace_id) =
+        read_workspace_info_from_auth_file(&codex_home.join(AUTH_FILE_NAME));
+    cached_quota_matches_workspace_id(quota, live_workspace_id.as_deref())
 }
 
 fn current_status_from_quota(store: &StoreData, quota: &AccountQuota) -> CurrentStatusView {
@@ -7525,14 +8143,41 @@ fn auto_sync_current_account_to_list(
     Ok(auto_name)
 }
 
-fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
-    let mut store = load_store()?;
-    let mut current = None;
-    let mut current_error = None;
-    let codex_home = codex_home()?;
-    let now_ms = now_ts_ms();
-    let cached_quota = cached_current_quota_snapshot(now_ms).and_then(|(quota, age_ms)| {
-        if cached_quota_matches_live_workspace(&codex_home, &quota) {
+fn fetch_quota_from_opencode_profile_snapshot_with_timeout(
+    store: &StoreData,
+    workspace_id: Option<&str>,
+    timeout_seconds: u64,
+) -> CmdResult<AccountQuota> {
+    let profile_name = find_profile_name_by_identity_prefer_existing(store, workspace_id, None)
+        .ok_or_else(|| "OpenCode 当前账号未映射到已保存账号快照。".to_string())?;
+    let record = store
+        .profiles
+        .get(&profile_name)
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("账号记录缺失: {profile_name}"))?;
+    let snapshot_dir = record_snapshot_dir(&profile_name, record)?;
+    fetch_quota_from_codex_home_with_timeout(&snapshot_dir, false, timeout_seconds)
+}
+
+fn fetch_quota_from_opencode_profile_snapshot(
+    store: &StoreData,
+    workspace_id: Option<&str>,
+) -> CmdResult<AccountQuota> {
+    fetch_quota_from_opencode_profile_snapshot_with_timeout(
+        store,
+        workspace_id,
+        APP_SERVER_TIMEOUT_DEFAULT_SECONDS,
+    )
+}
+
+fn load_live_opencode_current_status(
+    store: &mut StoreData,
+    sync_current: bool,
+    now_ms: i64,
+) -> (Option<CurrentStatusView>, Option<String>) {
+    let live_workspace_id = live_opencode_workspace_id_internal();
+    let cached_quota = cached_opencode_quota_snapshot(now_ms).and_then(|(quota, age_ms)| {
+        if cached_quota_matches_workspace_id(&quota, live_workspace_id.as_deref()) {
             Some((quota, age_ms))
         } else {
             None
@@ -7545,38 +8190,144 @@ fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
             .map(|(_, age_ms)| *age_ms <= CURRENT_QUOTA_CACHE_FRESH_MS)
             .unwrap_or(false);
     if can_use_fresh_cached {
-        if let Some((quota, _)) = cached_quota.as_ref() {
-            current = Some(current_status_from_quota(&store, quota));
-            return Ok(build_dashboard(&store, current, current_error));
-        }
+        return (
+            cached_quota
+            .as_ref()
+            .map(|(quota, _)| current_status_from_quota(store, quota)),
+            None,
+        );
+    }
+    if !sync_current
+        && opencode_quota_runtime_error_is_hot(now_ms, CURRENT_QUOTA_ERROR_COOLDOWN_MS)
+    {
+        return (
+            None,
+            latest_opencode_quota_runtime_error(now_ms, CURRENT_QUOTA_ERROR_COOLDOWN_MS),
+        );
     }
 
-    // Prefer live ~/.codex; fallback to recent cache when host/limit endpoint transiently fails.
-    match fetch_quota_from_codex_home(&codex_home, false) {
+    let process_count = get_opencode_process_count_internal();
+    if process_count == 0 {
+        return (None, None);
+    }
+
+    let quota_timeout_seconds = if sync_current {
+        APP_SERVER_TIMEOUT_DEFAULT_SECONDS
+    } else {
+        APP_SERVER_OPENCODE_POLL_TIMEOUT_SECONDS
+    };
+    let quota_result = fetch_quota_from_live_opencode_auth_with_timeout(quota_timeout_seconds);
+
+    match quota_result {
         Ok(quota) => {
-            update_current_quota_runtime_cache(&quota, now_ms);
-            if sync_current {
-                auto_sync_current_account_to_list(&mut store, &quota)?;
-                save_store(&store)?;
-            }
-            current = Some(current_status_from_quota(&store, &quota));
+            update_opencode_quota_runtime_cache(&quota, now_ms);
+            sync_live_quota_to_store(store, &quota, now_ms, AutoSwitchMode::OpenCode, sync_current);
+            (Some(current_status_from_quota(store, &quota)), None)
         }
         Err(err) => {
-            mark_current_quota_runtime_error(&err, now_ms);
-            if let Some((quota, age_ms)) = cached_quota {
-                current = Some(current_status_from_quota(&store, &quota));
-                if sync_current && age_ms > CURRENT_QUOTA_CACHE_FRESH_MS {
-                    current_error = Some(format!(
-                        "默认环境读取失败: {err}（已回退到缓存，{}秒前）",
-                        age_ms / 1000
-                    ));
-                }
-            } else {
-                current_error = Some(format!("默认环境读取失败: {err}"));
+            mark_opencode_quota_runtime_error(&err, now_ms);
+            (None, Some(err))
+        }
+    }
+}
+
+fn load_dashboard_internal_for_mode(
+    sync_current: bool,
+    mode: Option<AutoSwitchMode>,
+) -> CmdResult<DashboardData> {
+    let mut store = load_store()?;
+    let now_ms = now_ts_ms();
+    let need_opencode_current = true;
+    let mut current = None;
+    let (opencode_current, opencode_error) = if need_opencode_current {
+        load_live_opencode_current_status(&mut store, sync_current, now_ms)
+    } else {
+        (None, None)
+    };
+    let focus_mode = mode.unwrap_or(AutoSwitchMode::Gpt);
+    let mut current_error = None;
+    let mut current_error_mode = None;
+    if matches!(focus_mode, AutoSwitchMode::OpenCode) {
+        if opencode_current.is_none() {
+            current_error = opencode_error;
+            if current_error.is_some() {
+                current_error_mode = Some("opencode".to_string());
             }
         }
     }
-    Ok(build_dashboard(&store, current, current_error))
+    let codex_home_opt = codex_home().ok();
+    let cached_quota = cached_current_quota_snapshot(now_ms).and_then(|(quota, age_ms)| {
+        if let Some(codex_home) = codex_home_opt.as_ref() {
+            if cached_quota_matches_live_workspace(codex_home, &quota) {
+                Some((quota, age_ms))
+            } else {
+                None
+            }
+        } else {
+            Some((quota, age_ms))
+        }
+    });
+
+    let can_use_fresh_cached = !sync_current
+        && cached_quota
+            .as_ref()
+            .map(|(_, age_ms)| *age_ms <= CURRENT_QUOTA_CACHE_FRESH_MS)
+            .unwrap_or(false);
+    if can_use_fresh_cached {
+        if let Some((quota, _)) = cached_quota.as_ref() {
+            current = Some(current_status_from_quota(&store, quota));
+            return Ok(build_dashboard(
+                &store,
+                current,
+                opencode_current,
+                current_error,
+                current_error_mode,
+            ));
+        }
+    }
+    if let Some(quota) = quota_from_rollout_snapshot(&store) {
+        update_current_quota_runtime_cache(&quota, now_ms);
+        sync_live_quota_to_store(&mut store, &quota, now_ms, AutoSwitchMode::Gpt, sync_current);
+        current = Some(current_status_from_quota(&store, &quota));
+        return Ok(build_dashboard(
+            &store,
+            current,
+            opencode_current,
+            current_error,
+            current_error_mode,
+        ));
+    }
+    if let Some(quota) = quota_from_active_profile_record(&store) {
+        current = Some(current_status_from_quota(&store, &quota));
+        return Ok(build_dashboard(
+            &store,
+            current,
+            opencode_current,
+            current_error,
+            current_error_mode,
+        ));
+    }
+    if let Some((quota, _)) = cached_quota {
+        current = Some(current_status_from_quota(&store, &quota));
+        return Ok(build_dashboard(
+            &store,
+            current,
+            opencode_current,
+            current_error,
+            current_error_mode,
+        ));
+    }
+    Ok(build_dashboard(
+        &store,
+        current,
+        opencode_current,
+        current_error,
+        current_error_mode,
+    ))
+}
+
+fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
+    load_dashboard_internal_for_mode(sync_current, None)
 }
 
 fn save_current_profile_internal(profile_name: &str) -> CmdResult<DashboardData> {
@@ -8049,7 +8800,11 @@ fn set_profile_support_internal(name: &str, gpt: bool, opencode: bool) -> CmdRes
     load_dashboard_internal(true)
 }
 
-fn refresh_profile_quota_internal(name: &str, refresh_token: bool) -> CmdResult<DashboardData> {
+fn refresh_profile_quota_internal(
+    name: &str,
+    refresh_token: bool,
+    mode: Option<AutoSwitchMode>,
+) -> CmdResult<DashboardData> {
     let mut store = load_store()?;
     let profile_name = name.trim();
     if profile_name.is_empty() {
@@ -8060,17 +8815,44 @@ fn refresh_profile_quota_internal(name: &str, refresh_token: bool) -> CmdResult<
     }
     let _ = refresh_one_profile_quota(&mut store, profile_name, refresh_token);
     save_store(&store)?;
-    load_dashboard_internal(true)
+    load_dashboard_internal_for_mode(true, mode)
 }
 
-fn refresh_all_quota_internal(refresh_token: bool) -> CmdResult<DashboardData> {
+fn refresh_profiles_quota_internal(
+    names: &[String],
+    refresh_token: bool,
+    mode: Option<AutoSwitchMode>,
+) -> CmdResult<DashboardData> {
+    let mut store = load_store()?;
+    let mut deduped: HashSet<String> = HashSet::new();
+    for raw_name in names {
+        let profile_name = raw_name.trim();
+        if profile_name.is_empty() {
+            continue;
+        }
+        if !deduped.insert(profile_name.to_string()) {
+            continue;
+        }
+        if !store.profiles.contains_key(profile_name) {
+            continue;
+        }
+        let _ = refresh_one_profile_quota(&mut store, profile_name, refresh_token);
+    }
+    save_store(&store)?;
+    load_dashboard_internal_for_mode(true, mode)
+}
+
+fn refresh_all_quota_internal(
+    refresh_token: bool,
+    mode: Option<AutoSwitchMode>,
+) -> CmdResult<DashboardData> {
     let mut store = load_store()?;
     let names = list_profile_names(&store);
     for name in names {
         let _ = refresh_one_profile_quota(&mut store, &name, refresh_token);
     }
     save_store(&store)?;
-    load_dashboard_internal(true)
+    load_dashboard_internal_for_mode(true, mode)
 }
 
 fn keepalive_all_internal() -> CmdResult<DashboardData> {
@@ -8844,6 +9626,22 @@ fn count_unix_processes_by_name(proc_name: &str) -> u64 {
         .count() as u64
 }
 
+fn get_opencode_process_count_internal() -> u64 {
+    #[cfg(target_os = "windows")]
+    {
+        let counts =
+            count_windows_processes_by_images(&["OpenCode.exe", "opencode-cli.exe", "opencode.exe"]);
+        return counts.values().sum::<u64>();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        count_unix_processes_by_name("OpenCode")
+            + count_unix_processes_by_name("opencode")
+            + count_unix_processes_by_name("opencode-cli")
+    }
+}
+
 fn get_vscode_status_internal() -> VsCodeStatusView {
     #[cfg(target_os = "windows")]
     let process_count = {
@@ -9157,7 +9955,7 @@ fn read_num_from_map(map: &Map<String, Value>, keys: &[&str]) -> Option<i64> {
     None
 }
 
-fn parse_rate_window_remaining(window: &Map<String, Value>) -> Option<(i64, i64)> {
+fn parse_rate_window_remaining(window: &Map<String, Value>) -> Option<(i64, i64, Option<i64>)> {
     let minutes = read_num_from_map(
         window,
         &["window_minutes", "windowMinutes", "windowDurationMins"],
@@ -9167,33 +9965,34 @@ fn parse_rate_window_remaining(window: &Map<String, Value>) -> Option<(i64, i64)
             read_num_from_map(window, &["used_percent", "usedPercent"])
                 .map(|used| (100 - used).clamp(0, 100))
         })?;
-    Some((minutes, remaining.clamp(0, 100)))
+    let resets_at = read_num_from_map(window, &["resets_at", "resetsAt", "window_end", "windowEnd"]);
+    Some((minutes, remaining.clamp(0, 100), resets_at))
 }
 
 fn pick_remaining_window(
-    windows: &[(i64, i64)],
+    windows: &[(i64, i64, Option<i64>)],
     target_minutes: i64,
     tolerance_minutes: i64,
-) -> Option<i64> {
+) -> Option<(i64, Option<i64>)> {
     windows
         .iter()
-        .filter_map(|(mins, remain)| {
+        .filter_map(|(mins, remain, resets_at)| {
             let diff = (*mins - target_minutes).abs();
             if diff <= tolerance_minutes {
-                Some((diff, *remain))
+                Some((diff, *remain, *resets_at))
             } else {
                 None
             }
         })
-        .min_by_key(|(diff, _)| *diff)
-        .map(|(_, remain)| remain)
+        .min_by_key(|(diff, _, _)| *diff)
+        .map(|(_, remain, resets_at)| (remain, resets_at))
 }
 
 fn merge_runtime_quota_from_rate_limits(
     snapshot: &mut SessionQuotaSnapshot,
     rate_limits: &Map<String, Value>,
 ) {
-    let mut windows: Vec<(i64, i64)> = Vec::new();
+    let mut windows: Vec<(i64, i64, Option<i64>)> = Vec::new();
     for key in ["primary", "secondary"] {
         if let Some(obj) = rate_limits.get(key).and_then(Value::as_object) {
             if let Some(parsed) = parse_rate_window_remaining(obj) {
@@ -9205,12 +10004,14 @@ fn merge_runtime_quota_from_rate_limits(
     let five = pick_remaining_window(&windows, 300, 30);
     let week = pick_remaining_window(&windows, 10080, 12 * 60);
     let mut changed = false;
-    if let Some(v) = five {
-        snapshot.five_hour_remaining_percent = Some(v);
+    if let Some((remain, resets_at)) = five {
+        snapshot.five_hour_remaining_percent = Some(remain);
+        snapshot.five_hour_resets_at = resets_at;
         changed = true;
     }
-    if let Some(v) = week {
-        snapshot.one_week_remaining_percent = Some(v);
+    if let Some((remain, resets_at)) = week {
+        snapshot.one_week_remaining_percent = Some(remain);
+        snapshot.one_week_resets_at = resets_at;
         changed = true;
     }
     if changed {
@@ -9318,6 +10119,143 @@ fn process_session_log_line(line: &str, session: &mut SessionTailState) {
     process_event_msg_payload(payload, session);
 }
 
+fn read_latest_rollout_session_quota_snapshot_for_home(
+    codex_home_dir: &Path,
+) -> Option<SessionQuotaSnapshot> {
+    let path = find_latest_rollout_session_file_for_home(codex_home_dir)?;
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut snapshot = SessionQuotaSnapshot::default();
+    for line in reader.lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = value.get("payload").and_then(Value::as_object) else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+            continue;
+        }
+        if let Some(rate_limits) = payload.get("rate_limits").and_then(Value::as_object) {
+            merge_runtime_quota_from_rate_limits(&mut snapshot, rate_limits);
+        }
+    }
+    if snapshot.five_hour_remaining_percent.is_none() && snapshot.one_week_remaining_percent.is_none() {
+        return None;
+    }
+    Some(snapshot)
+}
+
+fn read_latest_rollout_session_quota_snapshot() -> Option<SessionQuotaSnapshot> {
+    let home = codex_home().ok()?;
+    read_latest_rollout_session_quota_snapshot_for_home(&home)
+}
+
+fn quota_from_rollout_snapshot(store: &StoreData) -> Option<AccountQuota> {
+    let snapshot = read_latest_rollout_session_quota_snapshot()?;
+
+    let active_record = store
+        .active_profile
+        .as_ref()
+        .and_then(|name| store.profiles.get(name))
+        .and_then(Value::as_object);
+    let profile_email = active_record
+        .and_then(|obj| obj.get("email"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let profile_workspace_name = active_record
+        .and_then(|obj| obj.get("workspace_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let profile_workspace_id = active_record
+        .and_then(|obj| obj.get("workspace_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    let (auth_workspace_name, auth_workspace_id) = codex_home()
+        .ok()
+        .map(|home| read_workspace_info_from_auth_file(&home.join(AUTH_FILE_NAME)))
+        .unwrap_or((None, None));
+
+    let five = snapshot.five_hour_remaining_percent.map(|remain| WindowQuota {
+        window_minutes: Some(300),
+        used_percent: Some((100 - remain).clamp(0, 100)),
+        remaining_percent: Some(remain.clamp(0, 100)),
+        resets_at: snapshot.five_hour_resets_at,
+    });
+    let week = snapshot.one_week_remaining_percent.map(|remain| WindowQuota {
+        window_minutes: Some(10080),
+        used_percent: Some((100 - remain).clamp(0, 100)),
+        remaining_percent: Some(remain.clamp(0, 100)),
+        resets_at: snapshot.one_week_resets_at,
+    });
+
+    Some(AccountQuota {
+        email: profile_email,
+        workspace_name: auth_workspace_name.or(profile_workspace_name),
+        workspace_id: auth_workspace_id.or(profile_workspace_id),
+        plan_type: None,
+        five_hour: five,
+        one_week: week,
+    })
+}
+
+fn quota_from_active_profile_record(store: &StoreData) -> Option<AccountQuota> {
+    let active_name = store.active_profile.as_ref()?;
+    let record = store.profiles.get(active_name)?.as_object()?;
+    let (five_pct, _, week_pct, _) = quota_fields_from_record(record);
+    let email = record
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    let workspace_name = record
+        .get("workspace_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    let workspace_id = record
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    let five_hour = five_pct.map(|remain| WindowQuota {
+        window_minutes: Some(300),
+        used_percent: Some((100 - remain).clamp(0, 100)),
+        remaining_percent: Some(remain.clamp(0, 100)),
+        resets_at: None,
+    });
+    let one_week = week_pct.map(|remain| WindowQuota {
+        window_minutes: Some(10080),
+        used_percent: Some((100 - remain).clamp(0, 100)),
+        remaining_percent: Some(remain.clamp(0, 100)),
+        resets_at: None,
+    });
+    Some(AccountQuota {
+        email,
+        workspace_name,
+        workspace_id,
+        plan_type: None,
+        five_hour,
+        one_week,
+    })
+}
+
 fn collect_rollout_session_files(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -9337,8 +10275,8 @@ fn collect_rollout_session_files(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn find_latest_rollout_session_file() -> Option<PathBuf> {
-    let root = codex_home().ok()?.join("sessions");
+fn find_latest_rollout_session_file_for_home(codex_home_dir: &Path) -> Option<PathBuf> {
+    let root = codex_home_dir.join("sessions");
     if !root.exists() {
         return None;
     }
@@ -9356,6 +10294,11 @@ fn find_latest_rollout_session_file() -> Option<PathBuf> {
         }
     }
     latest.map(|(_, path)| path)
+}
+
+fn find_latest_rollout_session_file() -> Option<PathBuf> {
+    let home = codex_home().ok()?;
+    find_latest_rollout_session_file_for_home(&home)
 }
 
 fn reset_session_tail_state(session: &mut SessionTailState, path: PathBuf) {
@@ -9648,12 +10591,18 @@ fn get_opencode_monitor_status_internal() -> OpenCodeMonitorStatusView {
         .ok()
         .and_then(|path| read_openai_entry_from_opencode_auth_file(&path))
         .is_some();
+    let process_count = get_opencode_process_count_internal();
+    let running = process_count > 0;
 
     let mut log_ready = false;
     let mut log_recent = false;
     let mut last_log_age_ms: Option<i64> = None;
     let mut activity_source: Option<String> = None;
     let mut activity_candidates: Vec<(i64, &'static str)> = Vec::new();
+
+    if running {
+        activity_candidates.push((0, "process"));
+    }
 
     if let Some(path) = find_latest_opencode_log_file() {
         log_ready = true;
@@ -9693,6 +10642,8 @@ fn get_opencode_monitor_status_internal() -> OpenCodeMonitorStatusView {
 
     OpenCodeMonitorStatusView {
         auth_ready,
+        running,
+        process_count,
         log_ready,
         log_recent,
         last_log_age_ms,
@@ -10317,6 +11268,81 @@ fn current_quota_for_trigger(
     }
 }
 
+fn update_session_quota_snapshot_from_account(
+    runtime: &mut AutoSwitchRuntime,
+    quota: &AccountQuota,
+    now_ms: i64,
+) {
+    runtime.session.quota.five_hour_remaining_percent =
+        quota.five_hour.as_ref().and_then(|v| v.remaining_percent);
+    runtime.session.quota.one_week_remaining_percent =
+        quota.one_week.as_ref().and_then(|v| v.remaining_percent);
+    runtime.session.quota.five_hour_resets_at =
+        quota.five_hour.as_ref().and_then(|v| v.resets_at);
+    runtime.session.quota.one_week_resets_at =
+        quota.one_week.as_ref().and_then(|v| v.resets_at);
+    runtime.session.quota.updated_at_ms = Some(now_ms);
+}
+
+fn fetch_live_quota_for_trigger(
+    mode: AutoSwitchMode,
+    store: &StoreData,
+) -> CmdResult<AccountQuota> {
+    match mode {
+        AutoSwitchMode::Gpt => quota_from_rollout_snapshot(store)
+            .or_else(|| quota_from_active_profile_record(store))
+            .ok_or_else(|| "未读取到 GPT 本地会话额度快照。".to_string()),
+        AutoSwitchMode::OpenCode => {
+            fetch_quota_from_live_opencode_auth_with_timeout(AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS)
+        }
+    }
+}
+
+fn maybe_sync_live_quota_for_trigger(
+    runtime: &mut AutoSwitchRuntime,
+    mode: AutoSwitchMode,
+    store: &StoreData,
+    now_ms: i64,
+    force: bool,
+) {
+    if !force
+        && runtime.last_live_quota_sync_at_ms > 0
+        && now_ms - runtime.last_live_quota_sync_at_ms < AUTO_SWITCH_LIVE_QUOTA_SYNC_INTERVAL_MS
+    {
+        return;
+    }
+    if !force {
+        let recent_error = if matches!(mode, AutoSwitchMode::Gpt) {
+            current_quota_runtime_error_is_hot(now_ms, AUTO_SWITCH_LIVE_QUOTA_ERROR_COOLDOWN_MS)
+        } else {
+            opencode_quota_runtime_error_is_hot(now_ms, AUTO_SWITCH_LIVE_QUOTA_ERROR_COOLDOWN_MS)
+        };
+        if recent_error {
+            return;
+        }
+    }
+    runtime.last_live_quota_sync_at_ms = now_ms;
+
+    match fetch_live_quota_for_trigger(mode, store) {
+        Ok(quota) => {
+            let refreshed_at = now_ts_ms();
+            update_session_quota_snapshot_from_account(runtime, &quota, refreshed_at);
+            if matches!(mode, AutoSwitchMode::Gpt) {
+                update_current_quota_runtime_cache(&quota, refreshed_at);
+            } else {
+                update_opencode_quota_runtime_cache(&quota, refreshed_at);
+            }
+        }
+        Err(err) => {
+            if matches!(mode, AutoSwitchMode::Gpt) {
+                mark_current_quota_runtime_error(&err, now_ms);
+            } else {
+                mark_opencode_quota_runtime_error(&err, now_ms);
+            }
+        }
+    }
+}
+
 fn soft_trigger_hit(five_hour: Option<i64>, one_week: Option<i64>) -> bool {
     five_hour
         .map(|v| v <= SOFT_TRIGGER_FIVE_HOUR_THRESHOLD)
@@ -10333,6 +11359,28 @@ fn candidate_quota_ok(five_hour: Option<i64>, one_week: Option<i64>) -> bool {
         && one_week
             .map(|v| v > CANDIDATE_MIN_ONE_WEEK)
             .unwrap_or(false)
+}
+
+fn profile_candidate_ready(store: &StoreData, name: &str) -> bool {
+    let Some(record) = store.profiles.get(name).and_then(Value::as_object) else {
+        return false;
+    };
+    let Ok(snapshot_dir) = record_snapshot_dir(name, record) else {
+        return false;
+    };
+    if profile_validity(record, &snapshot_dir) != "正常" {
+        return false;
+    }
+    let (five, _, week, _) = quota_fields_from_record(record);
+    candidate_quota_ok(five, week)
+}
+
+fn profile_supports_mode(record: &Map<String, Value>, mode: AutoSwitchMode) -> bool {
+    let support = profile_support_from_value(record.get("support"));
+    match mode {
+        AutoSwitchMode::Gpt => support.gpt,
+        AutoSwitchMode::OpenCode => support.opencode,
+    }
 }
 
 fn sync_session_tail_for_mode(
@@ -10673,6 +11721,34 @@ fn auto_switch_tick_internal(
         None if soft_hit => runtime.pending_reason = Some(TriggerReason::Soft),
         _ => {}
     }
+    if runtime.pending_reason.is_some() {
+        maybe_sync_live_quota_for_trigger(runtime, mode, &store_for_trigger, now_ms, false);
+        now_ms = now_ts_ms();
+        let active_profile_name = match mode {
+            AutoSwitchMode::Gpt => store_for_trigger.active_profile.clone(),
+            AutoSwitchMode::OpenCode => {
+                let live_workspace_id = live_opencode_workspace_id_internal();
+                find_profile_name_by_identity_prefer_existing(
+                    &store_for_trigger,
+                    live_workspace_id.as_deref(),
+                    None,
+                )
+            }
+        };
+        let (live_five, live_week) = current_quota_for_trigger(
+            runtime,
+            &store_for_trigger,
+            now_ms,
+            active_profile_name.as_deref(),
+        );
+        let live_soft_hit = soft_trigger_hit(live_five, live_week);
+        match runtime.pending_reason {
+            Some(TriggerReason::Hard) => {}
+            Some(TriggerReason::Soft) if !live_soft_hit => runtime.pending_reason = None,
+            None if live_soft_hit => runtime.pending_reason = Some(TriggerReason::Soft),
+            _ => {}
+        }
+    }
 
     if runtime.pending_reason.is_none() {
         return Ok(AutoSwitchTickResult::new("idle"));
@@ -10726,20 +11802,28 @@ fn auto_switch_tick_internal(
         if active.as_deref() == Some(name.as_str()) {
             continue;
         }
-        checked += 1;
-        let _ = refresh_one_profile_quota(&mut store, &name, false);
         let Some(record) = store.profiles.get(&name).and_then(Value::as_object) else {
             continue;
         };
-        let Ok(snapshot_dir) = record_snapshot_dir(&name, record) else {
-            continue;
-        };
-        let validity = profile_validity(record, &snapshot_dir);
-        if validity != "正常" {
+        if !profile_supports_mode(record, mode) {
             continue;
         }
-        let (five, _, week, _) = quota_fields_from_record(record);
-        if candidate_quota_ok(five, week) {
+        checked += 1;
+        let refreshed = refresh_one_profile_quota_with_timeout(
+            &mut store,
+            &name,
+            false,
+            AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS,
+        ) || refresh_one_profile_quota_with_timeout(
+            &mut store,
+            &name,
+            true,
+            AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS,
+        );
+        if !refreshed && !profile_candidate_ready(&store, &name) {
+            continue;
+        }
+        if profile_candidate_ready(&store, &name) {
             picked = Some(name);
             break;
         }
@@ -10762,6 +11846,63 @@ fn auto_switch_tick_internal(
         runtime.switch_cooldown_until_ms = now_ms + AUTO_SWITCH_SWITCH_COOLDOWN_MS;
         let mut result = AutoSwitchTickResult::new("guard_cancelled");
         result.message = Some("切号前检测到会话状态变化，已取消本次切号。".to_string());
+        fill_pending_reason(&mut result, runtime);
+        return Ok(result);
+    }
+
+    now_ms = now_ts_ms();
+    maybe_sync_live_quota_for_trigger(runtime, mode, &store, now_ms, true);
+    now_ms = now_ts_ms();
+    let active_profile_name = match mode {
+        AutoSwitchMode::Gpt => store.active_profile.clone(),
+        AutoSwitchMode::OpenCode => {
+            let live_workspace_id = live_opencode_workspace_id_internal();
+            find_profile_name_by_identity_prefer_existing(
+                &store,
+                live_workspace_id.as_deref(),
+                None,
+            )
+        }
+    };
+    let (latest_five, latest_week) = current_quota_for_trigger(
+        runtime,
+        &store,
+        now_ms,
+        active_profile_name.as_deref(),
+    );
+    if runtime.pending_reason == Some(TriggerReason::Soft)
+        && !soft_trigger_hit(latest_five, latest_week)
+    {
+        runtime.pending_reason = None;
+        runtime.switch_cooldown_until_ms = now_ms + AUTO_SWITCH_SWITCH_COOLDOWN_MS;
+        let mut result = AutoSwitchTickResult::new("recheck_cancelled");
+        result.message = Some("切号前复检发现额度已恢复，已取消本次无感换号。".to_string());
+        return Ok(result);
+    }
+
+    let target_refreshed = refresh_one_profile_quota_with_timeout(
+        &mut store,
+        &target_profile,
+        false,
+        AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS,
+    ) || refresh_one_profile_quota_with_timeout(
+        &mut store,
+        &target_profile,
+        true,
+        AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS,
+    );
+    let target_ready = profile_candidate_ready(&store, &target_profile);
+    save_store(&store)?;
+    if !target_ready {
+        now_ms = now_ts_ms();
+        runtime.no_candidate_until_ms = now_ms + AUTO_SWITCH_NO_CANDIDATE_COOLDOWN_MS;
+        let mut result = AutoSwitchTickResult::new("candidate_recheck_failed");
+        result.message = Some(if target_refreshed {
+            "候选账号复检未通过（可能额度已变更或登录态失效），已取消本次切号。".to_string()
+        } else {
+            "候选账号复检未通过（实时配额刷新失败，且缓存额度不满足条件），已取消本次切号。"
+                .to_string()
+        });
         fill_pending_reason(&mut result, runtime);
         return Ok(result);
     }
@@ -10838,9 +11979,12 @@ fn fmt_reset(ts: Option<i64>) -> String {
 }
 
 #[tauri::command]
-async fn load_dashboard(sync_current: Option<bool>) -> CmdResult<DashboardData> {
+async fn load_dashboard(sync_current: Option<bool>, _mode: Option<String>) -> CmdResult<DashboardData> {
     let sync_current = sync_current.unwrap_or(true);
-    tauri::async_runtime::spawn_blocking(move || load_dashboard_internal(sync_current))
+    let mode = _mode
+        .as_deref()
+        .map(|value| parse_auto_switch_mode(Some(value)));
+    tauri::async_runtime::spawn_blocking(move || load_dashboard_internal_for_mode(sync_current, mode))
         .await
         .map_err(|e| format!("加载看板任务执行失败: {e}"))?
 }
@@ -10881,19 +12025,46 @@ fn set_profile_support(name: String, gpt: bool, opencode: bool) -> CmdResult<Das
 async fn refresh_profile_quota(
     name: String,
     refresh_token: Option<bool>,
+    mode: Option<String>,
 ) -> CmdResult<DashboardData> {
     let refresh_token = refresh_token.unwrap_or(false);
+    let mode = mode
+        .as_deref()
+        .map(|value| parse_auto_switch_mode(Some(value)));
     tauri::async_runtime::spawn_blocking(move || {
-        refresh_profile_quota_internal(&name, refresh_token)
+        refresh_profile_quota_internal(&name, refresh_token, mode)
     })
     .await
     .map_err(|e| format!("刷新账号额度任务执行失败: {e}"))?
 }
 
 #[tauri::command]
-async fn refresh_all_quota(refresh_token: Option<bool>) -> CmdResult<DashboardData> {
+async fn refresh_profiles_quota(
+    names: Vec<String>,
+    refresh_token: Option<bool>,
+    mode: Option<String>,
+) -> CmdResult<DashboardData> {
     let refresh_token = refresh_token.unwrap_or(false);
-    tauri::async_runtime::spawn_blocking(move || refresh_all_quota_internal(refresh_token))
+    let mode = mode
+        .as_deref()
+        .map(|value| parse_auto_switch_mode(Some(value)));
+    tauri::async_runtime::spawn_blocking(move || {
+        refresh_profiles_quota_internal(&names, refresh_token, mode)
+    })
+    .await
+    .map_err(|e| format!("批量刷新账号额度任务执行失败: {e}"))?
+}
+
+#[tauri::command]
+async fn refresh_all_quota(
+    refresh_token: Option<bool>,
+    mode: Option<String>,
+) -> CmdResult<DashboardData> {
+    let refresh_token = refresh_token.unwrap_or(false);
+    let mode = mode
+        .as_deref()
+        .map(|value| parse_auto_switch_mode(Some(value)));
+    tauri::async_runtime::spawn_blocking(move || refresh_all_quota_internal(refresh_token, mode))
         .await
         .map_err(|e| format!("刷新全部额度任务执行失败: {e}"))?
 }
@@ -10906,27 +12077,35 @@ async fn keepalive_all() -> CmdResult<DashboardData> {
 }
 
 #[tauri::command]
-fn auto_switch_tick(
+async fn auto_switch_tick(
     auto_runtime: State<'_, AutoSwitchRuntimeState>,
     mode: Option<String>,
 ) -> CmdResult<AutoSwitchTickResult> {
-    let mut runtime = auto_runtime
-        .inner
-        .lock()
-        .map_err(|_| "无感换号状态锁定失败。".to_string())?;
-    auto_switch_tick_internal(&mut runtime, mode.as_deref())
+    let runtime = auto_runtime.inner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = runtime
+            .lock()
+            .map_err(|_| "无感换号状态锁定失败。".to_string())?;
+        auto_switch_tick_internal(&mut guard, mode.as_deref())
+    })
+    .await
+    .map_err(|e| format!("无感换号检测任务执行失败: {e}"))?
 }
 
 #[tauri::command]
-fn thread_recover_tick(
+async fn thread_recover_tick(
     auto_runtime: State<'_, AutoSwitchRuntimeState>,
     mode: Option<String>,
 ) -> CmdResult<AutoSwitchTickResult> {
-    let mut runtime = auto_runtime
-        .inner
-        .lock()
-        .map_err(|_| "无感换号状态锁定失败。".to_string())?;
-    thread_recover_tick_internal(&mut runtime, mode.as_deref())
+    let runtime = auto_runtime.inner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = runtime
+            .lock()
+            .map_err(|_| "无感换号状态锁定失败。".to_string())?;
+        thread_recover_tick_internal(&mut guard, mode.as_deref())
+    })
+    .await
+    .map_err(|e| format!("会话恢复检测任务执行失败: {e}"))?
 }
 
 #[tauri::command]
@@ -11057,13 +12236,17 @@ async fn get_opencode_monitor_status() -> CmdResult<OpenCodeMonitorStatusView> {
 }
 
 #[tauri::command]
-fn get_codex_extension_info() -> CodexExtensionInfoView {
-    get_codex_extension_info_internal()
+async fn get_codex_extension_info() -> CmdResult<CodexExtensionInfoView> {
+    tauri::async_runtime::spawn_blocking(get_codex_extension_info_internal)
+        .await
+        .map_err(|e| format!("检测 Codex 扩展版本任务执行失败: {e}"))
 }
 
 #[tauri::command]
-fn is_codex_hook_installed() -> bool {
-    has_codex_hook_installed_internal()
+async fn is_codex_hook_installed() -> CmdResult<bool> {
+    tauri::async_runtime::spawn_blocking(has_codex_hook_installed_internal)
+        .await
+        .map_err(|e| format!("检测 Hook 注入状态任务执行失败: {e}"))
 }
 
 #[tauri::command]
@@ -11221,12 +12404,62 @@ fn open_external_url(app: tauri::AppHandle, url: String) -> CmdResult<bool> {
     Ok(true)
 }
 
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AutoSwitchRuntimeState::default())
+        .setup(|app| {
+            let _ = APP_RUNTIME_HANDLE.set(app.handle().clone());
+            if let Some(tray) = app.tray_by_id(TRAY_ICON_ID) {
+                let show_item = MenuItem::with_id(
+                    app,
+                    TRAY_MENU_SHOW_ID,
+                    "显示主窗口",
+                    true,
+                    None::<&str>,
+                );
+                let exit_item =
+                    MenuItem::with_id(app, TRAY_MENU_EXIT_ID, "退出程序", true, None::<&str>);
+                if let (Ok(show_item), Ok(exit_item)) = (show_item, exit_item) {
+                    if let Ok(menu) = Menu::with_items(app, &[&show_item, &exit_item]) {
+                        let _ = tray.set_menu(Some(menu));
+                    }
+                }
+            }
+            Ok(())
+        })
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_MENU_SHOW_ID => show_main_window(app),
+            TRAY_MENU_EXIT_ID => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|app, event| {
+            if event.id().as_ref() != TRAY_ICON_ID {
+                return;
+            }
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => show_main_window(app),
+                TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                } => show_main_window(app),
+                _ => {}
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             load_dashboard,
             save_current_profile,
@@ -11235,6 +12468,7 @@ pub fn run() {
             set_workspace_alias,
             set_profile_support,
             refresh_profile_quota,
+            refresh_profiles_quota,
             refresh_all_quota,
             keepalive_all,
             auto_switch_tick,

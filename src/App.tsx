@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import {
   DndContext,
@@ -65,7 +66,9 @@ interface DashboardData {
   appName: string;
   activeProfile?: string | null;
   current?: CurrentStatusView | null;
+  opencodeCurrent?: CurrentStatusView | null;
   currentError?: string | null;
+  currentErrorMode?: "gpt" | "opencode" | null;
   lastKeepaliveAt?: number | null;
   profiles: ProfileView[];
 }
@@ -86,6 +89,8 @@ interface VsCodeStatusView {
 
 interface OpenCodeMonitorStatusView {
   authReady: boolean;
+  running: boolean;
+  processCount: number;
   logReady: boolean;
   logRecent: boolean;
   lastLogAgeMs?: number | null;
@@ -102,6 +107,11 @@ interface CodexExtensionInfoView {
 interface LoginProgressPayload {
   phase: string;
   message: string;
+}
+
+interface AppServerLogPayload {
+  message?: string;
+  ts?: string;
 }
 
 interface BackupExportResult {
@@ -218,6 +228,7 @@ interface McpPresetOption {
 type PostSwitchStrategy = "hook" | "restart_extension_host";
 type AppMode = "gpt" | "opencode";
 type ActiveProfileByMode = Record<AppMode, string | null>;
+type WindowCloseAction = "ask" | "exit" | "background";
 type SkillTarget = "claude" | "codex" | "gemini" | "opencode";
 type McpTarget = "claude" | "codex" | "gemini" | "opencode";
 type ToolView = "dashboard" | "skills" | "skillsDiscovery" | "skillsRepos" | "prompts" | "mcp" | "mcpAdd";
@@ -315,18 +326,20 @@ const AUTO_HOOK_VERSION_POLL_MS = 3000;
 const HOOK_LISTEN_POLL_MS = 3000;
 const HOOK_LISTEN_VSCODE_POLL_MS = 15_000;
 const LIVE_STATUS_POLL_MS = 500;
-const LIVE_STATUS_FETCH_MIN_MS = 1500;
+const LIVE_STATUS_FETCH_MIN_MS = 500;
 const LIVE_STATUS_ERROR_RETRY_MS = 250;
 const LIVE_STATUS_ERROR_RETRY_MAX_MS = 900;
 const LIVE_STATUS_BURST_WINDOW_MS = 3000;
 const LIVE_STATUS_BURST_THRESHOLD = 6;
 const LIVE_STATUS_BURST_COOLDOWN_MS = 900;
-const LIVE_STATUS_DISPLAY_STALE_MS = 4200;
+const STARTUP_LOAD_TIMEOUT_MS = 8000;
+const STARTUP_BACKGROUND_SYNC_DELAY_MS = 120;
 const DASHBOARD_WAIT_STEP_MS = 250;
 const DASHBOARD_WAIT_MAX_STEPS = 40;
 const AUTO_SEAMLESS_STORAGE_KEY = "codex-switch.autoSeamlessSwitch";
 const AUTO_REFRESH_ON_STARTUP_STORAGE_KEY = "codex-switch.autoRefreshQuotaOnStartup";
 const POST_SWITCH_STRATEGY_STORAGE_KEY = "codex-switch.postSwitchStrategy";
+const WINDOW_CLOSE_ACTION_STORAGE_KEY = "codex-switch.windowCloseAction";
 const HOOK_VERSION_SNAPSHOT_STORAGE_KEY = "codex-switch.hookVersionSnapshot";
 const APP_MODE_STORAGE_KEY = "codex-switch.activeAppMode";
 const ACTIVE_PROFILE_BY_MODE_STORAGE_KEY = "codex-switch.activeProfileByMode";
@@ -353,6 +366,18 @@ function readPostSwitchStrategyStorage(fallback: PostSwitchStrategy): PostSwitch
   try {
     const raw = window.localStorage.getItem(POST_SWITCH_STRATEGY_STORAGE_KEY);
     if (raw === "hook" || raw === "restart_extension_host") {
+      return raw;
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readWindowCloseActionStorage(fallback: WindowCloseAction): WindowCloseAction {
+  try {
+    const raw = window.localStorage.getItem(WINDOW_CLOSE_ACTION_STORAGE_KEY);
+    if (raw === "ask" || raw === "exit" || raw === "background") {
       return raw;
     }
     return fallback;
@@ -408,6 +433,40 @@ function readActiveProfileByModeStorage(): ActiveProfileByMode {
   } catch {
     return fallback;
   }
+}
+
+function withTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return task;
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(new Error(`${label}超时（>${Math.floor(timeoutMs / 1000)}秒）`));
+    }, timeoutMs);
+    task.then(
+      (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -480,36 +539,15 @@ function formatCheckedAt(value?: string | null): string {
   if (!text) {
     return "-";
   }
-
-  const formatLocal = (d: Date) => {
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mi = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
-  };
-
-  const hasExplicitTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(text);
-  if (hasExplicitTimezone) {
-    const tzDate = new Date(text);
-    if (!Number.isNaN(tzDate.getTime())) {
-      return formatLocal(tzDate);
-    }
-  }
-
   const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/.exec(text);
   if (m) {
     const ss = m[6] || "00";
     return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${ss}`;
   }
-
   const d = new Date(text);
   if (!Number.isNaN(d.getTime())) {
-    return formatLocal(d);
+    return formatLocalDateTimeFromMs(d.getTime());
   }
-
   return text.replace("T", " ").replace("Z", "");
 }
 
@@ -585,63 +623,70 @@ function formatLocalDateTimeFromMs(ms: number): string {
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
 }
 
-function parseCheckedAtToMs(value?: string | null): number | null {
-  if (!value) {
-    return null;
-  }
-  const text = value.trim();
-  if (!text) {
-    return null;
-  }
-  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})$/.exec(text);
-  if (m) {
-    const dt = new Date(
-      Number(m[1]),
-      Number(m[2]) - 1,
-      Number(m[3]),
-      Number(m[4]),
-      Number(m[5]),
-      Number(m[6]),
-      0,
-    );
-    const t = dt.getTime();
-    return Number.isNaN(t) ? null : t;
-  }
-  const parsed = new Date(text);
-  const ts = parsed.getTime();
-  return Number.isNaN(ts) ? null : ts;
-}
-
 function normalizeIdentityValue(value?: string | null): string | null {
   const text = (value || "").trim().toLowerCase();
   return text || null;
 }
 
-function findProfileNameForCurrent(data: DashboardData): string | null {
-  if (!data.current) {
-    return data.activeProfile ?? null;
+function dashboardCurrentByMode(data: DashboardData | null | undefined, mode: AppMode): CurrentStatusView | null {
+  if (!data) {
+    return null;
   }
-  const currentWorkspace = normalizeIdentityValue(data.current.workspaceId);
-  const currentEmail = normalizeIdentityValue(data.current.email);
+  if (mode === "opencode") {
+    return data.opencodeCurrent ?? data.current ?? null;
+  }
+  return data.current ?? null;
+}
+
+function findProfileNameForCurrent(
+  data: DashboardData,
+  current?: CurrentStatusView | null,
+  fallbackProfileName?: string | null,
+): string | null {
+  const targetCurrent = current ?? data.current ?? null;
+  if (!targetCurrent) {
+    return fallbackProfileName ?? data.activeProfile ?? null;
+  }
+  const currentWorkspace = normalizeIdentityValue(targetCurrent.workspaceId);
+  const currentWorkspaceName = normalizeIdentityValue(targetCurrent.workspaceName ?? targetCurrent.displayWorkspace);
+  const currentEmail = normalizeIdentityValue(targetCurrent.email);
 
   let exactMatch: string | null = null;
   let exactCount = 0;
   let workspaceMatch: string | null = null;
   let workspaceCount = 0;
+  let workspaceNameMatch: string | null = null;
+  let workspaceNameCount = 0;
+  let workspaceNameEmailMatch: string | null = null;
+  let workspaceNameEmailCount = 0;
   let emailMatch: string | null = null;
   let emailCount = 0;
 
   for (const profile of data.profiles) {
     const profileWorkspace = normalizeIdentityValue(profile.workspaceId);
+    const profileWorkspaceName = normalizeIdentityValue(profile.workspaceName ?? profile.displayWorkspace);
     const profileEmail = normalizeIdentityValue(profile.email);
 
     if (currentWorkspace && profileWorkspace === currentWorkspace) {
       workspaceCount += 1;
       workspaceMatch = profile.name;
     }
+    if (currentWorkspaceName && profileWorkspaceName === currentWorkspaceName) {
+      workspaceNameCount += 1;
+      workspaceNameMatch = profile.name;
+    }
     if (currentEmail && profileEmail === currentEmail) {
       emailCount += 1;
       emailMatch = profile.name;
+    }
+    if (
+      currentWorkspaceName &&
+      currentEmail &&
+      profileWorkspaceName === currentWorkspaceName &&
+      profileEmail === currentEmail
+    ) {
+      workspaceNameEmailCount += 1;
+      workspaceNameEmailMatch = profile.name;
     }
     if (
       currentWorkspace &&
@@ -660,10 +705,16 @@ function findProfileNameForCurrent(data: DashboardData): string | null {
   if (currentWorkspace && workspaceCount === 1 && workspaceMatch) {
     return workspaceMatch;
   }
+  if (currentWorkspaceName && currentEmail && workspaceNameEmailCount === 1 && workspaceNameEmailMatch) {
+    return workspaceNameEmailMatch;
+  }
+  if (currentWorkspaceName && workspaceNameCount === 1 && workspaceNameMatch) {
+    return workspaceNameMatch;
+  }
   if (currentEmail && emailCount === 1 && emailMatch) {
     return emailMatch;
   }
-  return data.activeProfile ?? null;
+  return fallbackProfileName ?? data.activeProfile ?? null;
 }
 
 function buildDashboardSignature(data: DashboardData): string {
@@ -688,7 +739,9 @@ interface SortableProfileCardProps {
   selected: boolean;
   isModeActive: boolean;
   busy: boolean;
-  checkedAtOverride?: string | null;
+  showLiveQuerying?: boolean;
+  isQuotaRefreshing?: boolean;
+  liveQueryError?: string | null;
   onSelect: (name: string) => void;
   onRefreshQuota: (name: string) => void;
   onApply: (name: string) => void;
@@ -702,7 +755,9 @@ function SortableProfileCard({
   selected,
   isModeActive,
   busy,
-  checkedAtOverride,
+  showLiveQuerying = false,
+  isQuotaRefreshing = false,
+  liveQueryError = null,
   onSelect,
   onRefreshQuota,
   onApply,
@@ -719,6 +774,14 @@ function SortableProfileCard({
     animationDelay: `${Math.min(index * 45, 320)}ms`,
   };
   const statusText = stripCurrentActiveSuffix(profile.status);
+  const compactError = (raw?: string | null): string | null => {
+    const text = (raw || "").trim();
+    if (!text) {
+      return null;
+    }
+    return text.length > 72 ? `${text.slice(0, 72)}...` : text;
+  };
+  const liveError = compactError(liveQueryError);
 
   return (
     <div ref={setNodeRef} style={style} className={`sortable-item ${isDragging ? "sorting-item-dragging" : ""}`}>
@@ -757,7 +820,25 @@ function SortableProfileCard({
               <small>{formatReset(profile.fiveHourResetsAt, "time")}</small>
             </span>
           </div>
-          <div className="meta-line">最近刷新: {formatCheckedAt(checkedAtOverride ?? profile.lastCheckedAt)}</div>
+          <div className="meta-line">
+            {isQuotaRefreshing ? (
+              <span className="meta-querying">
+                <span className="meta-spinner" aria-hidden />
+                <span>配额查询中...</span>
+              </span>
+            ) : showLiveQuerying && liveError ? (
+              <span className="meta-error" title={liveQueryError || undefined}>
+                配额实时查询失败: {liveError}
+              </span>
+            ) : showLiveQuerying ? (
+              <span className="meta-querying">
+                <span className="meta-spinner" aria-hidden />
+                <span>配额实时查询中...</span>
+              </span>
+            ) : (
+              `最近刷新: ${formatCheckedAt(profile.lastCheckedAt)}`
+            )}
+          </div>
         </div>
         <div className="card-side">
           <div className="support-badge-row">
@@ -769,15 +850,18 @@ function SortableProfileCard({
           <div className="status-row">
             <span className={`status-pill ${statusClass(statusText)}`}>{statusText}</span>
             <button
-              className="mini-icon"
+              className={`mini-icon ${isQuotaRefreshing ? "mini-icon-querying" : ""}`}
               disabled={busy}
-              title="刷新此账号额度"
+              title={isQuotaRefreshing ? "配额查询中..." : "刷新此账号额度"}
+              aria-label={isQuotaRefreshing ? "配额查询中" : "刷新此账号额度"}
               onClick={(e) => {
                 e.stopPropagation();
                 onRefreshQuota(profile.name);
               }}
             >
-              ↻
+              <span className={isQuotaRefreshing ? "icon-spin" : undefined} aria-hidden>
+                ↻
+              </span>
             </button>
           </div>
           <div className="action-rail">
@@ -910,6 +994,7 @@ function App() {
   const [statusText, setStatusText] = useState("账号加载中...");
   const [busy, setBusy] = useState(true);
   const [quotaQuerying, setQuotaQuerying] = useState(false);
+  const [refreshingProfileNames, setRefreshingProfileNames] = useState<string[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
   const [autoSeamlessSwitch, setAutoSeamlessSwitch] = useState<boolean>(() =>
     readBoolStorage(AUTO_SEAMLESS_STORAGE_KEY, true),
@@ -920,6 +1005,11 @@ function App() {
   const [postSwitchStrategy, setPostSwitchStrategy] = useState<PostSwitchStrategy>(() =>
     readPostSwitchStrategyStorage("restart_extension_host"),
   );
+  const [windowCloseAction, setWindowCloseAction] = useState<WindowCloseAction>(() =>
+    readWindowCloseActionStorage("ask"),
+  );
+  const [closePromptOpen, setClosePromptOpen] = useState(false);
+  const [closePromptRemember, setClosePromptRemember] = useState(false);
   const [autoKeepalive, setAutoKeepalive] = useState(true);
   const [blockingMessage, setBlockingMessage] = useState<string | null>(null);
   const [activeAppMode, setActiveAppMode] = useState<AppMode>(() => readAppModeStorage("gpt"));
@@ -985,16 +1075,117 @@ function App() {
   const pendingSortNamesRef = useRef<string[] | null>(null);
   const autoHookUpgradeRunningRef = useRef(false);
   const importBackupInputRef = useRef<HTMLInputElement | null>(null);
+  const bypassCloseInterceptRef = useRef(false);
   const liveStatusPollingRef = useRef(false);
   const liveStatusNextFetchAtRef = useRef(0);
   const liveStatusErrorStreakRef = useRef(0);
   const liveStatusErrorTimesRef = useRef<number[]>([]);
   const hookListenerVsCodeLastPollAtRef = useRef(0);
+  const activeAppModeRef = useRef<AppMode>(activeAppMode);
+  const activeProfileByModeRef = useRef<ActiveProfileByMode>(activeProfileByMode);
 
   const switchAppMode = useCallback((mode: AppMode) => {
     setActiveAppMode(mode);
     setStatusText(`已切换到 ${mode === "gpt" ? "GPT" : "OpenCode"} 模式`);
   }, []);
+
+  const minimizeWindowToBackground = useCallback(async () => {
+    try {
+      const window = getCurrentWindow();
+      await window.hide();
+      setStatusText("窗口已隐藏到系统托盘。");
+    } catch (err) {
+      setStatusText(`切到系统托盘失败: ${String(err)}`);
+    }
+  }, []);
+
+  const exitApplicationWindow = useCallback(async () => {
+    bypassCloseInterceptRef.current = true;
+    try {
+      await getCurrentWindow().close();
+    } catch (err) {
+      bypassCloseInterceptRef.current = false;
+      setStatusText(`关闭窗口失败: ${String(err)}`);
+    }
+  }, []);
+
+  const handleClosePromptAction = useCallback(
+    async (action: Exclude<WindowCloseAction, "ask">) => {
+      const remember = closePromptRemember;
+      setClosePromptOpen(false);
+      setClosePromptRemember(false);
+      if (remember) {
+        setWindowCloseAction(action);
+      }
+      if (action === "exit") {
+        await exitApplicationWindow();
+      } else {
+        await minimizeWindowToBackground();
+      }
+    },
+    [closePromptRemember, exitApplicationWindow, minimizeWindowToBackground],
+  );
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    const bind = async () => {
+      try {
+        unlisten = await listen<AppServerLogPayload>("codex-switch://app-server-log", (event) => {
+          const message = event.payload?.message?.trim();
+          if (!message) {
+            return;
+          }
+          const ts = event.payload?.ts?.trim();
+          if (ts) {
+            console.log(`[codex-switch][app-server][${ts}] ${message}`);
+          } else {
+            console.log(`[codex-switch][app-server] ${message}`);
+          }
+        });
+      } catch {
+        // ignore if event bus not ready yet
+      }
+    };
+    void bind();
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    const bind = async () => {
+      try {
+        unlisten = await getCurrentWindow().onCloseRequested(async (event) => {
+          if (bypassCloseInterceptRef.current) {
+            bypassCloseInterceptRef.current = false;
+            return;
+          }
+          event.preventDefault();
+          if (windowCloseAction === "exit") {
+            await exitApplicationWindow();
+            return;
+          }
+          if (windowCloseAction === "background") {
+            await minimizeWindowToBackground();
+            return;
+          }
+          setClosePromptRemember(false);
+          setClosePromptOpen(true);
+        });
+      } catch {
+        // ignore when window event API is unavailable
+      }
+    };
+    void bind();
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [exitApplicationWindow, minimizeWindowToBackground, windowCloseAction]);
 
   const loadSkillsCatalog = useCallback(async (showLoading: boolean) => {
     if (showLoading) {
@@ -1696,19 +1887,23 @@ function App() {
   }, [activeToolView, loadMcpManage, mcpManage, mcpManageLoading, mcpManageRefreshing]);
 
   const applyDashboard = useCallback((data: DashboardData, msg?: string) => {
-    const currentProfileName = findProfileNameForCurrent(data);
-    const currentCheckedAt = formatLocalDateTimeFromMs(Date.now());
+    const currentMode = activeAppModeRef.current;
+    const modeCurrent = dashboardCurrentByMode(data, currentMode);
+    const currentProfileName = findProfileNameForCurrent(
+      data,
+      modeCurrent,
+      activeProfileByModeRef.current[currentMode],
+    );
     const mergedProfiles =
-      currentProfileName && data.current
+      currentProfileName && modeCurrent
         ? data.profiles.map((profile) =>
             profile.name === currentProfileName
               ? {
                   ...profile,
-                  fiveHourRemainingPercent: data.current?.fiveHourRemainingPercent,
-                  fiveHourResetsAt: data.current?.fiveHourResetsAt,
-                  oneWeekRemainingPercent: data.current?.oneWeekRemainingPercent,
-                  oneWeekResetsAt: data.current?.oneWeekResetsAt,
-                  lastCheckedAt: currentCheckedAt,
+                  fiveHourRemainingPercent: modeCurrent?.fiveHourRemainingPercent,
+                  fiveHourResetsAt: modeCurrent?.fiveHourResetsAt,
+                  oneWeekRemainingPercent: modeCurrent?.oneWeekRemainingPercent,
+                  oneWeekResetsAt: modeCurrent?.oneWeekResetsAt,
                 }
               : profile,
           )
@@ -1734,10 +1929,21 @@ function App() {
   }, []);
 
   const loadDashboard = useCallback(
-    async (syncCurrent = true, msg?: string, markInitialDone = false) => {
+    async (
+      syncCurrent = true,
+      msg?: string,
+      markInitialDone = false,
+      timeoutMs?: number,
+    ) => {
       setBusy(true);
       try {
-        const data = await invoke<DashboardData>("load_dashboard", { syncCurrent });
+        const mode = activeAppModeRef.current;
+        const task = invoke<DashboardData>("load_dashboard", {
+          syncCurrent,
+          mode,
+        });
+        const data =
+          mode === "opencode" ? await withTimeout(task, timeoutMs ?? 0, "加载账号") : await task;
         applyDashboard(data, msg);
         if (data.currentError) {
           const detail = formatCurrentErrorWithProfile(data, data.currentError) ?? data.currentError;
@@ -1756,7 +1962,27 @@ function App() {
   );
 
   useEffect(() => {
-    void loadDashboard(true, "已加载", true);
+    const startupMode = activeAppModeRef.current;
+    if (startupMode !== "opencode") {
+      void loadDashboard(true, "已加载", true);
+      return;
+    }
+    let cancelled = false;
+    const bootstrap = async () => {
+      await loadDashboard(false, "已加载", true, STARTUP_LOAD_TIMEOUT_MS);
+      if (cancelled) {
+        return;
+      }
+      window.setTimeout(() => {
+        if (!cancelled) {
+          void loadDashboard(true);
+        }
+      }, STARTUP_BACKGROUND_SYNC_DELAY_MS);
+    };
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
   }, [loadDashboard]);
 
   const refreshCurrentDashboardSilent = useCallback(async () => {
@@ -1774,7 +2000,10 @@ function App() {
     liveStatusNextFetchAtRef.current = now + LIVE_STATUS_FETCH_MIN_MS;
     try {
       // High-frequency UI polling only reads local dashboard state; backend rate-limit reads are cached.
-      const data = await invoke<DashboardData>("load_dashboard", { syncCurrent: false });
+      const data = await invoke<DashboardData>("load_dashboard", {
+        syncCurrent: false,
+        mode: activeAppModeRef.current,
+      });
       const nextSignature = buildDashboardSignature(data);
       if (nextSignature !== dashboardSignatureRef.current) {
         applyDashboard(data);
@@ -1835,6 +2064,14 @@ function App() {
   }, [blockingMessage]);
 
   useEffect(() => {
+    activeAppModeRef.current = activeAppMode;
+  }, [activeAppMode]);
+
+  useEffect(() => {
+    activeProfileByModeRef.current = activeProfileByMode;
+  }, [activeProfileByMode]);
+
+  useEffect(() => {
     try {
       window.localStorage.setItem(APP_MODE_STORAGE_KEY, activeAppMode);
     } catch {
@@ -1854,6 +2091,7 @@ function App() {
     () => displayProfiles.filter((profile) => supportsAppMode(profile.support, activeAppMode)),
     [activeAppMode, displayProfiles],
   );
+  const refreshingProfileNameSet = useMemo(() => new Set(refreshingProfileNames), [refreshingProfileNames]);
 
   const modeActiveProfileName = useMemo(() => {
     const preferred = activeProfileByMode[activeAppMode];
@@ -1880,28 +2118,17 @@ function App() {
     );
   }, [activeAppMode, modeActiveProfileName]);
 
-  const currentProfileName = useMemo(
-    () => (dashboard ? findProfileNameForCurrent(dashboard) : null),
-    [dashboard],
+  const modeCurrent = useMemo(
+    () => dashboardCurrentByMode(dashboard, activeAppMode),
+    [activeAppMode, dashboard],
   );
 
-  const getProfileCheckedAtForDisplay = useCallback(
-    (profile: ProfileView): string | null | undefined => {
-      const raw = profile.lastCheckedAt;
-      if (!raw || !dashboard?.current || !currentProfileName || profile.name !== currentProfileName) {
-        return raw;
-      }
-      const baseMs = parseCheckedAtToMs(raw);
-      if (!baseMs) {
-        return raw;
-      }
-      const nowMs = Date.now();
-      if (nowMs - baseMs > LIVE_STATUS_DISPLAY_STALE_MS) {
-        return raw;
-      }
-      return formatLocalDateTimeFromMs(Math.max(baseMs, nowMs));
-    },
-    [currentProfileName, dashboard?.current],
+  const currentProfileName = useMemo(
+    () =>
+      dashboard
+        ? findProfileNameForCurrent(dashboard, modeCurrent, activeProfileByMode[activeAppMode])
+        : null,
+    [activeAppMode, activeProfileByMode, dashboard, modeCurrent],
   );
 
   useEffect(() => {
@@ -1939,25 +2166,34 @@ function App() {
     [displayProfiles, filteredProfiles, profileNoMap],
   );
 
-  const currentErrorText = useMemo(
-    () => formatCurrentErrorWithProfile(dashboard, dashboard?.currentError),
-    [dashboard],
-  );
+  const currentErrorText = useMemo(() => {
+    if (!dashboard?.currentError) {
+      return null;
+    }
+    if (dashboard.currentErrorMode && dashboard.currentErrorMode !== activeAppMode) {
+      return null;
+    }
+    return formatCurrentErrorWithProfile(dashboard, dashboard.currentError);
+  }, [activeAppMode, dashboard]);
   const uiBusy = busy && !initialLoading;
 
   const currentLine = useMemo(() => {
     const modeLabel = activeAppMode === "gpt" ? "GPT" : "OpenCode";
+    const current = modeCurrent;
     if (initialLoading) {
       return `当前${modeLabel}账号: 账号加载中...`;
     }
-    if (!modeActiveProfile) {
+    if (!modeActiveProfile && !current) {
       return `当前${modeLabel}账号: 未选择`;
     }
-    const email = modeActiveProfile.email || "-";
-    return `当前${modeLabel}账号: ${email} | 工作空间 ${modeActiveProfile.displayWorkspace} | 5 小时剩余 ${pct(
-      modeActiveProfile.fiveHourRemainingPercent,
-    )} | 1 周剩余 ${pct(modeActiveProfile.oneWeekRemainingPercent)}`;
-  }, [activeAppMode, initialLoading, modeActiveProfile]);
+    const email = current?.email || modeActiveProfile?.email || "-";
+    const workspace = current?.displayWorkspace || modeActiveProfile?.displayWorkspace || "-";
+    const fiveHourRemaining = current?.fiveHourRemainingPercent ?? modeActiveProfile?.fiveHourRemainingPercent;
+    const oneWeekRemaining = current?.oneWeekRemainingPercent ?? modeActiveProfile?.oneWeekRemainingPercent;
+    return `当前${modeLabel}账号: ${email} | 工作空间 ${workspace} | 5 小时剩余 ${pct(
+      fiveHourRemaining,
+    )} | 1 周剩余 ${pct(oneWeekRemaining)}`;
+  }, [activeAppMode, initialLoading, modeActiveProfile, modeCurrent]);
 
   const hookListenerBadge = useMemo(() => {
     if (vscodeStatus === null || hookInstalled === null) {
@@ -1978,6 +2214,9 @@ function App() {
     }
     if (!opencodeMonitorStatus.authReady) {
       return { level: "warn", text: "未监听（未登录）" };
+    }
+    if (opencodeMonitorStatus.running) {
+      return { level: "ok", text: "监听中" };
     }
     if (opencodeMonitorStatus.activityRecent) {
       return { level: "ok", text: "监听中" };
@@ -2004,11 +2243,21 @@ function App() {
       args: Record<string, unknown>,
       successText: string,
       beforeText?: string,
-      options?: { quotaQuerying?: boolean },
+      options?: { quotaQuerying?: boolean; refreshingProfiles?: string[] },
     ): Promise<boolean> => {
       const isQuotaQuerying = options?.quotaQuerying === true;
+      const refreshingProfiles = (options?.refreshingProfiles || []).filter((name) => name.trim().length > 0);
       if (isQuotaQuerying) {
         setQuotaQuerying(true);
+      }
+      if (refreshingProfiles.length > 0) {
+        setRefreshingProfileNames((prev) => {
+          const next = new Set(prev);
+          for (const name of refreshingProfiles) {
+            next.add(name);
+          }
+          return Array.from(next);
+        });
       }
       setBusy(true);
       if (beforeText) {
@@ -2025,6 +2274,10 @@ function App() {
         setBusy(false);
         if (isQuotaQuerying) {
           setQuotaQuerying(false);
+        }
+        if (refreshingProfiles.length > 0) {
+          const refreshingSet = new Set(refreshingProfiles);
+          setRefreshingProfileNames((prev) => prev.filter((name) => !refreshingSet.has(name)));
         }
       }
     },
@@ -2061,7 +2314,14 @@ function App() {
       );
       const data = await invoke<DashboardData>("add_account_by_login", {});
       applyDashboard(data, finalLoginNotice ?? "添加账号完成");
-      const matched = findProfileNameForCurrent(data) ?? data.activeProfile ?? null;
+      const matched =
+        findProfileNameForCurrent(
+          data,
+          dashboardCurrentByMode(data, activeAppModeRef.current),
+          activeProfileByModeRef.current[activeAppModeRef.current],
+        ) ??
+        data.activeProfile ??
+        null;
       if (
         matched &&
         data.profiles.some((profile) => profile.name === matched && supportsAppMode(profile.support, activeAppMode))
@@ -2126,10 +2386,10 @@ function App() {
     const label = profileLabel(target);
     await runDashboardCommand(
       "refresh_profile_quota",
-      { name: target, refreshToken },
+      { name: target, refreshToken, mode: activeAppMode },
       `已刷新额度: ${label}`,
       `正在刷新额度: ${label}...`,
-      { quotaQuerying: true },
+      { quotaQuerying: true, refreshingProfiles: [target] },
     );
   };
 
@@ -2137,14 +2397,42 @@ function App() {
     async (refreshToken = false) => {
       await runDashboardCommand(
         "refresh_all_quota",
-        { refreshToken },
+        { refreshToken, mode: activeAppMode },
         "已刷新全部账号额度",
         "正在刷新全部账号额度...",
-        { quotaQuerying: true },
+        { quotaQuerying: true, refreshingProfiles: filteredProfiles.map((profile) => profile.name) },
       );
     },
-    [runDashboardCommand],
+    [filteredProfiles, runDashboardCommand],
   );
+
+  const onRefreshStartupQuota = useCallback(async () => {
+    if (activeAppMode !== "opencode") {
+      await onRefreshAllQuota(false);
+      return;
+    }
+    const currentName = currentProfileName ?? modeActiveProfileName;
+    const targets = filteredProfiles
+      .map((profile) => profile.name)
+      .filter((name) => name !== currentName);
+    if (targets.length === 0) {
+      return;
+    }
+    await runDashboardCommand(
+      "refresh_profiles_quota",
+      { names: targets, refreshToken: false, mode: "opencode" },
+      `已刷新 ${targets.length} 个账号额度`,
+      `启动自动查询：正在刷新其余 ${targets.length} 个账号额度...`,
+      { quotaQuerying: true, refreshingProfiles: targets },
+    );
+  }, [
+    activeAppMode,
+    currentProfileName,
+    filteredProfiles,
+    modeActiveProfileName,
+    onRefreshAllQuota,
+    runDashboardCommand,
+  ]);
 
   useEffect(() => {
     if (initialLoading || startupQuotaRefreshDoneRef.current) {
@@ -2152,9 +2440,9 @@ function App() {
     }
     startupQuotaRefreshDoneRef.current = true;
     if (autoRefreshOnStartup) {
-      void onRefreshAllQuota(false);
+      void onRefreshStartupQuota();
     }
-  }, [autoRefreshOnStartup, initialLoading, onRefreshAllQuota]);
+  }, [autoRefreshOnStartup, initialLoading, onRefreshStartupQuota]);
 
   const onDeleteSelected = async (name?: string) => {
     const target = name ?? requireSelectedName();
@@ -2202,6 +2490,8 @@ function App() {
         if (
           prev &&
           prev.authReady === status.authReady &&
+          prev.running === status.running &&
+          prev.processCount === status.processCount &&
           prev.logReady === status.logReady &&
           prev.logRecent === status.logRecent &&
           (prev.lastLogAgeMs ?? null) === (status.lastLogAgeMs ?? null) &&
@@ -2569,6 +2859,14 @@ function App() {
 
   useEffect(() => {
     try {
+      window.localStorage.setItem(WINDOW_CLOSE_ACTION_STORAGE_KEY, windowCloseAction);
+    } catch {
+      // ignore storage write failures
+    }
+  }, [windowCloseAction]);
+
+  useEffect(() => {
+    try {
       if (hookVersionSnapshot) {
         window.localStorage.setItem(HOOK_VERSION_SNAPSHOT_STORAGE_KEY, hookVersionSnapshot);
       } else {
@@ -2780,6 +3078,10 @@ function App() {
       window.clearTimeout(seamlessTimerRef.current);
       seamlessTimerRef.current = null;
     }
+    if (initialLoading) {
+      seamlessRunningRef.current = false;
+      return;
+    }
 
     if (!autoSeamlessSwitch) {
       seamlessRunningRef.current = false;
@@ -2872,10 +3174,17 @@ function App() {
       seamlessRunningRef.current = false;
       void invoke<string>("auto_switch_reset").catch(() => {});
     };
-  }, [activeAppMode, autoSeamlessSwitch, applyDashboard, postSwitchStrategy, runPostSwitchStrategy]);
+  }, [
+    activeAppMode,
+    autoSeamlessSwitch,
+    applyDashboard,
+    initialLoading,
+    postSwitchStrategy,
+    runPostSwitchStrategy,
+  ]);
 
   useEffect(() => {
-    if (!autoSeamlessSwitch) {
+    if (initialLoading || !autoSeamlessSwitch) {
       if (threadRecoverTimerRef.current) {
         window.clearTimeout(threadRecoverTimerRef.current);
         threadRecoverTimerRef.current = null;
@@ -2933,7 +3242,7 @@ function App() {
       }
       threadRecoverRunningRef.current = false;
     };
-  }, [activeAppMode, autoSeamlessSwitch]);
+  }, [activeAppMode, autoSeamlessSwitch, initialLoading]);
 
   useEffect(() => {
     autoEnabledRef.current = autoKeepalive;
@@ -3054,6 +3363,53 @@ function App() {
             <div className="blocking-title">{blockingMessage}</div>
             <div className="blocking-tip">请等待当前流程完成，期间主窗口已锁定。</div>
           </div>
+        </div>
+      ) : null}
+      {closePromptOpen ? (
+        <div
+          className="close-choice-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="关闭窗口方式"
+          onClick={() => {
+            setClosePromptOpen(false);
+            setClosePromptRemember(false);
+          }}
+        >
+          <section className="close-choice-dialog" onClick={(event) => event.stopPropagation()}>
+            <header className="close-choice-header">
+              <div className="close-choice-title">关闭窗口</div>
+              <button
+                className="header-icon close-choice-close"
+                type="button"
+                title="关闭"
+                aria-label="关闭"
+                onClick={() => {
+                  setClosePromptOpen(false);
+                  setClosePromptRemember(false);
+                }}
+              >
+                ✕
+              </button>
+            </header>
+            <div className="close-choice-desc">点击右上角关闭按钮（X）时，请选择默认行为：</div>
+            <label className="close-choice-remember">
+              <input
+                type="checkbox"
+                checked={closePromptRemember}
+                onChange={(event) => setClosePromptRemember(event.target.checked)}
+              />
+              <span>记住我的选择，下次不再询问（可在设置中心修改）</span>
+            </label>
+            <div className="close-choice-actions">
+              <button className="settings-btn primary" type="button" onClick={() => void handleClosePromptAction("background")}>
+                隐藏到系统托盘
+              </button>
+              <button className="settings-btn" type="button" onClick={() => void handleClosePromptAction("exit")}>
+                直接退出
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
       {settingsOpen ? (
@@ -3210,6 +3566,52 @@ function App() {
                   提示：首次安装后请点一次“安装/更新方案2 Hook 提速版”；之后仅在 Codex 扩展版本更新，或 Hook
                   状态显示“未注入/版本过旧”时再点一次。
                 </div>
+              </section>
+
+              <section className="settings-group">
+                <div className="settings-group-title">窗口关闭行为</div>
+                <label className={`strategy-item ${windowCloseAction === "ask" ? "active" : ""}`}>
+                  <input
+                    type="radio"
+                    name="windowCloseAction"
+                    value="ask"
+                    checked={windowCloseAction === "ask"}
+                    onChange={() => setWindowCloseAction("ask")}
+                    disabled={uiBusy}
+                  />
+                  <div className="strategy-main">
+                    <div className="strategy-title">每次询问</div>
+                    <div className="strategy-desc">点右上角 X 时，弹窗选择“退出程序”或“隐藏到系统托盘”。</div>
+                  </div>
+                </label>
+                <label className={`strategy-item ${windowCloseAction === "background" ? "active" : ""}`}>
+                  <input
+                    type="radio"
+                    name="windowCloseAction"
+                    value="background"
+                    checked={windowCloseAction === "background"}
+                    onChange={() => setWindowCloseAction("background")}
+                    disabled={uiBusy}
+                  />
+                  <div className="strategy-main">
+                    <div className="strategy-title">直接隐藏到系统托盘</div>
+                    <div className="strategy-desc">点 X 不退出程序，仅隐藏窗口并驻留托盘。</div>
+                  </div>
+                </label>
+                <label className={`strategy-item ${windowCloseAction === "exit" ? "active" : ""}`}>
+                  <input
+                    type="radio"
+                    name="windowCloseAction"
+                    value="exit"
+                    checked={windowCloseAction === "exit"}
+                    onChange={() => setWindowCloseAction("exit")}
+                    disabled={uiBusy}
+                  />
+                  <div className="strategy-main">
+                    <div className="strategy-title">直接退出程序</div>
+                    <div className="strategy-desc">点 X 不再询问，立即关闭 Codex Switch。</div>
+                  </div>
+                </label>
               </section>
             </div>
           </section>
@@ -3404,22 +3806,45 @@ function App() {
               >
                 <SortableContext items={profileIds} strategy={verticalListSortingStrategy}>
                   <div className="cards-list">
-                    {filteredProfiles.map((p, idx) => (
-                      <SortableProfileCard
-                        key={p.name}
-                        profile={p}
-                        index={idx}
-                        selected={selected === p.name}
-                        isModeActive={modeActiveProfileName === p.name}
-                        busy={uiBusy}
-                        checkedAtOverride={getProfileCheckedAtForDisplay(p)}
-                        onSelect={setSelected}
-                        onRefreshQuota={(name) => void onRefreshSelectedQuota(name, false)}
-                        onApply={(name) => void onApplySelected(name)}
-                        onSetAlias={(name) => void onSetAlias(name)}
-                        onDelete={(name) => void onDeleteSelected(name)}
-                      />
-                    ))}
+                    {filteredProfiles.map((p, idx) => {
+                      const liveSyncedProfile =
+                        p.name === currentProfileName && modeCurrent
+                          ? {
+                              ...p,
+                              fiveHourRemainingPercent: modeCurrent.fiveHourRemainingPercent,
+                              fiveHourResetsAt: modeCurrent.fiveHourResetsAt,
+                              oneWeekRemainingPercent: modeCurrent.oneWeekRemainingPercent,
+                              oneWeekResetsAt: modeCurrent.oneWeekResetsAt,
+                            }
+                          : p;
+                      return (
+                        <SortableProfileCard
+                          key={p.name}
+                          profile={liveSyncedProfile}
+                          index={idx}
+                          selected={selected === p.name}
+                          isModeActive={
+                            (activeAppMode === "opencode"
+                              ? currentProfileName ?? modeActiveProfileName
+                              : modeActiveProfileName) === p.name
+                          }
+                          busy={uiBusy}
+                          showLiveQuerying={p.name === currentProfileName}
+                          isQuotaRefreshing={quotaQuerying && refreshingProfileNameSet.has(p.name)}
+                          liveQueryError={
+                            p.name === currentProfileName &&
+                            (!dashboard?.currentErrorMode || dashboard.currentErrorMode === activeAppMode)
+                              ? dashboard?.currentError ?? null
+                              : null
+                          }
+                          onSelect={setSelected}
+                          onRefreshQuota={(name) => void onRefreshSelectedQuota(name, false)}
+                          onApply={(name) => void onApplySelected(name)}
+                          onSetAlias={(name) => void onSetAlias(name)}
+                          onDelete={(name) => void onDeleteSelected(name)}
+                        />
+                      );
+                    })}
                   </div>
                 </SortableContext>
               </DndContext>
