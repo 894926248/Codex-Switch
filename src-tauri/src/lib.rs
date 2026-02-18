@@ -7832,6 +7832,13 @@ fn load_dashboard_internal_for_mode(
             return Ok(build_dashboard(&store, current, opencode_current, current_error));
         }
     }
+    if !sync_current {
+        if let Some(quota) = quota_from_rollout_snapshot(&store) {
+            update_current_quota_runtime_cache(&quota, now_ms);
+            current = Some(current_status_from_quota(&store, &quota));
+            return Ok(build_dashboard(&store, current, opencode_current, current_error));
+        }
+    }
     // Prefer live ~/.codex; fallback to recent cache when host/limit endpoint transiently fails.
     match fetch_quota_from_codex_home(&codex_home, false) {
         Ok(quota) => {
@@ -7844,7 +7851,10 @@ fn load_dashboard_internal_for_mode(
         }
         Err(err) => {
             mark_current_quota_runtime_error(&err, now_ms);
-            if let Some((quota, age_ms)) = cached_quota {
+            if let Some(quota) = quota_from_rollout_snapshot(&store) {
+                update_current_quota_runtime_cache(&quota, now_ms);
+                current = Some(current_status_from_quota(&store, &quota));
+            } else if let Some((quota, age_ms)) = cached_quota {
                 current = Some(current_status_from_quota(&store, &quota));
                 if sync_current && age_ms > CURRENT_QUOTA_CACHE_FRESH_MS {
                     current_error = Some(format!(
@@ -9617,6 +9627,92 @@ fn process_session_log_line(line: &str, session: &mut SessionTailState) {
         return;
     };
     process_event_msg_payload(payload, session);
+}
+
+fn read_latest_rollout_session_quota_snapshot() -> Option<SessionQuotaSnapshot> {
+    let path = find_latest_rollout_session_file()?;
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut snapshot = SessionQuotaSnapshot::default();
+    for line in reader.lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = value.get("payload").and_then(Value::as_object) else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+            continue;
+        }
+        if let Some(rate_limits) = payload.get("rate_limits").and_then(Value::as_object) {
+            merge_runtime_quota_from_rate_limits(&mut snapshot, rate_limits);
+        }
+    }
+    if snapshot.five_hour_remaining_percent.is_none() && snapshot.one_week_remaining_percent.is_none() {
+        return None;
+    }
+    Some(snapshot)
+}
+
+fn quota_from_rollout_snapshot(store: &StoreData) -> Option<AccountQuota> {
+    let snapshot = read_latest_rollout_session_quota_snapshot()?;
+
+    let active_record = store
+        .active_profile
+        .as_ref()
+        .and_then(|name| store.profiles.get(name))
+        .and_then(Value::as_object);
+    let profile_email = active_record
+        .and_then(|obj| obj.get("email"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let profile_workspace_name = active_record
+        .and_then(|obj| obj.get("workspace_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let profile_workspace_id = active_record
+        .and_then(|obj| obj.get("workspace_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    let (auth_workspace_name, auth_workspace_id) = codex_home()
+        .ok()
+        .map(|home| read_workspace_info_from_auth_file(&home.join(AUTH_FILE_NAME)))
+        .unwrap_or((None, None));
+
+    let five = snapshot.five_hour_remaining_percent.map(|remain| WindowQuota {
+        window_minutes: Some(300),
+        used_percent: Some((100 - remain).clamp(0, 100)),
+        remaining_percent: Some(remain.clamp(0, 100)),
+        resets_at: None,
+    });
+    let week = snapshot.one_week_remaining_percent.map(|remain| WindowQuota {
+        window_minutes: Some(10080),
+        used_percent: Some((100 - remain).clamp(0, 100)),
+        remaining_percent: Some(remain.clamp(0, 100)),
+        resets_at: None,
+    });
+
+    Some(AccountQuota {
+        email: profile_email,
+        workspace_name: auth_workspace_name.or(profile_workspace_name),
+        workspace_id: auth_workspace_id.or(profile_workspace_id),
+        plan_type: None,
+        five_hour: five,
+        one_week: week,
+    })
 }
 
 fn collect_rollout_session_files(root: &Path, out: &mut Vec<PathBuf>) {
