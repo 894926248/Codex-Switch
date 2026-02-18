@@ -213,7 +213,7 @@ type ActiveProfileByMode = Record<AppMode, string | null>;
 type SkillTarget = "codex" | "opencode";
 type ToolView = "dashboard" | "skills" | "skillsDiscovery" | "skillsRepos" | "prompts" | "mcp" | "mcpAdd";
 
-const MCP_DEFAULT_CONFIG = '{\n  "type": "stdio",\n  "command": "uvx",\n  "args": ["mcp-server-fetch"]\n}';
+const MCP_CONFIG_PLACEHOLDER = '{\n  "type": "stdio",\n  "command": "uvx",\n  "args": ["mcp-server-fetch"]\n}';
 const IS_WINDOWS_PLATFORM = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
 
 function createNpxPresetSpec(packageName: string): Record<string, unknown> {
@@ -940,7 +940,7 @@ function App() {
   const [mcpFormTags, setMcpFormTags] = useState("");
   const [mcpFormHomepage, setMcpFormHomepage] = useState("");
   const [mcpFormDocs, setMcpFormDocs] = useState("");
-  const [mcpFormConfig, setMcpFormConfig] = useState(MCP_DEFAULT_CONFIG);
+  const [mcpFormConfig, setMcpFormConfig] = useState("");
   const [mcpSelectedPreset, setMcpSelectedPreset] = useState<string>("custom");
   const [mcpShowMetadata, setMcpShowMetadata] = useState(false);
   const [mcpFormClaudeEnabled, setMcpFormClaudeEnabled] = useState(true);
@@ -1094,7 +1094,7 @@ function App() {
     setMcpFormTags("");
     setMcpFormHomepage("");
     setMcpFormDocs("");
-    setMcpFormConfig(MCP_DEFAULT_CONFIG);
+    setMcpFormConfig("");
     setMcpSelectedPreset("custom");
     setMcpShowMetadata(false);
     setMcpFormClaudeEnabled(true);
@@ -1123,7 +1123,7 @@ function App() {
       setMcpFormTags("");
       setMcpFormHomepage("");
       setMcpFormDocs("");
-      setMcpFormConfig(MCP_DEFAULT_CONFIG);
+      setMcpFormConfig("");
       setMcpFormError(null);
       return;
     }
@@ -4031,7 +4031,7 @@ function App() {
               onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setMcpFormConfig(event.target.value)}
               spellCheck={false}
               rows={10}
-              placeholder={MCP_DEFAULT_CONFIG}
+              placeholder={MCP_CONFIG_PLACEHOLDER}
             />
             <button type="button" className="mcp-json-format-btn" onClick={onFormatMcpConfig}>
               <Wrench className="mcp-json-format-icon" />
