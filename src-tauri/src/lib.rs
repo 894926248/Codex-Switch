@@ -297,6 +297,9 @@ struct CurrentQuotaRuntimeCache {
 }
 
 static CURRENT_QUOTA_RUNTIME_CACHE: OnceLock<Mutex<CurrentQuotaRuntimeCache>> = OnceLock::new();
+static OPENCODE_CURRENT_QUOTA_RUNTIME_CACHE: OnceLock<Mutex<CurrentQuotaRuntimeCache>> =
+    OnceLock::new();
+static OPENCODE_QUOTA_BRIDGE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StoreData {
@@ -356,6 +359,7 @@ struct DashboardData {
     app_name: String,
     active_profile: Option<String>,
     current: Option<CurrentStatusView>,
+    opencode_current: Option<CurrentStatusView>,
     current_error: Option<String>,
     last_keepalive_at: Option<i64>,
     profiles: Vec<ProfileView>,
@@ -403,6 +407,8 @@ struct CodexExtensionInfoView {
 #[serde(rename_all = "camelCase")]
 struct OpenCodeMonitorStatusView {
     auth_ready: bool,
+    running: bool,
+    process_count: u64,
     log_ready: bool,
     log_recent: bool,
     last_log_age_ms: Option<i64>,
@@ -6205,6 +6211,72 @@ fn live_opencode_workspace_id_internal() -> Option<String> {
     opencode_workspace_id_from_openai_entry(&entry)
 }
 
+fn opencode_quota_bridge_home() -> CmdResult<PathBuf> {
+    Ok(switcher_home()?.join("runtime").join("opencode_live_codex_home"))
+}
+
+fn write_codex_auth_from_opencode_entry(
+    codex_home_dir: &Path,
+    openai_entry: &Map<String, Value>,
+) -> CmdResult<()> {
+    let access = read_non_empty_string(openai_entry, &["access", "access_token", "accessToken"])
+        .ok_or_else(|| "OpenCode auth 缺少 access token。".to_string())?;
+    let refresh = read_non_empty_string(openai_entry, &["refresh", "refresh_token", "refreshToken"])
+        .ok_or_else(|| "OpenCode auth 缺少 refresh token。".to_string())?;
+    let account_id = read_non_empty_string(
+        openai_entry,
+        &["accountId", "account_id", "workspace_id", "workspaceId"],
+    );
+
+    let mut tokens = Map::new();
+    tokens.insert("id_token".to_string(), Value::String(access.clone()));
+    tokens.insert("access_token".to_string(), Value::String(access));
+    tokens.insert("refresh_token".to_string(), Value::String(refresh));
+    if let Some(id) = account_id {
+        tokens.insert("account_id".to_string(), Value::String(id));
+    }
+
+    let mut root = Map::new();
+    root.insert("auth_mode".to_string(), Value::String("chatgpt".to_string()));
+    root.insert("OPENAI_API_KEY".to_string(), Value::Null);
+    root.insert("tokens".to_string(), Value::Object(tokens));
+    root.insert(
+        "last_refresh".to_string(),
+        Value::Number(serde_json::Number::from(Utc::now().timestamp())),
+    );
+
+    fs::create_dir_all(codex_home_dir)
+        .map_err(|e| format!("创建 OpenCode 配额桥接目录失败: {e}"))?;
+    let auth_path = codex_home_dir.join(AUTH_FILE_NAME);
+    let text = serde_json::to_string_pretty(&Value::Object(root))
+        .map_err(|e| format!("序列化 OpenCode 桥接 auth.json 失败: {e}"))?;
+    fs::write(&auth_path, format!("{text}\n"))
+        .map_err(|e| format!("写入 OpenCode 桥接 auth.json 失败 {}: {e}", auth_path.display()))
+}
+
+fn fetch_quota_from_live_opencode_auth() -> CmdResult<AccountQuota> {
+    let auth_path = opencode_auth_file()?;
+    let entry = read_openai_entry_from_opencode_auth_file(&auth_path)
+        .ok_or_else(|| "OpenCode 未登录或缺少 openai 登录态。".to_string())?;
+    let openai_entry = entry
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "OpenCode openai 登录态格式无效。".to_string())?;
+    let fallback_workspace_id = opencode_workspace_id_from_openai_entry(&entry);
+
+    let _guard = opencode_quota_bridge_lock()
+        .lock()
+        .map_err(|_| "OpenCode 配额桥接锁获取失败。".to_string())?;
+    let bridge_home = opencode_quota_bridge_home()?;
+    write_codex_auth_from_opencode_entry(&bridge_home, &openai_entry)?;
+
+    let mut quota = fetch_quota_from_codex_home(&bridge_home, false)?;
+    if quota.workspace_id.as_deref().unwrap_or("").trim().is_empty() {
+        quota.workspace_id = fallback_workspace_id;
+    }
+    Ok(quota)
+}
+
 fn sync_opencode_snapshot_from_live_auth_best_effort(target_dir: &Path) {
     let snapshot_path = target_dir.join(OPENCODE_OPENAI_SNAPSHOT_FILE_NAME);
     let auth_path = match opencode_auth_file() {
@@ -7398,6 +7470,7 @@ fn build_profile_view(store: &StoreData, name: &str, record: &Map<String, Value>
 fn build_dashboard(
     store: &StoreData,
     current: Option<CurrentStatusView>,
+    opencode_current: Option<CurrentStatusView>,
     current_error: Option<String>,
 ) -> DashboardData {
     let mut profiles = Vec::new();
@@ -7414,6 +7487,7 @@ fn build_dashboard(
         app_name: APP_NAME.to_string(),
         active_profile: store.active_profile.clone(),
         current,
+        opencode_current,
         current_error,
         last_keepalive_at: store.last_keepalive_at,
         profiles,
@@ -7424,8 +7498,20 @@ fn current_quota_runtime_cache() -> &'static Mutex<CurrentQuotaRuntimeCache> {
     CURRENT_QUOTA_RUNTIME_CACHE.get_or_init(|| Mutex::new(CurrentQuotaRuntimeCache::default()))
 }
 
-fn cached_current_quota_snapshot(now_ms: i64) -> Option<(AccountQuota, i64)> {
-    let cache = current_quota_runtime_cache().lock().ok()?;
+fn opencode_current_quota_runtime_cache() -> &'static Mutex<CurrentQuotaRuntimeCache> {
+    OPENCODE_CURRENT_QUOTA_RUNTIME_CACHE
+        .get_or_init(|| Mutex::new(CurrentQuotaRuntimeCache::default()))
+}
+
+fn opencode_quota_bridge_lock() -> &'static Mutex<()> {
+    OPENCODE_QUOTA_BRIDGE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn cached_quota_snapshot_for_cache(
+    cache: &Mutex<CurrentQuotaRuntimeCache>,
+    now_ms: i64,
+) -> Option<(AccountQuota, i64)> {
+    let cache = cache.lock().ok()?;
     let quota = cache.quota.clone()?;
     if cache.fetched_at_ms <= 0 {
         return None;
@@ -7437,8 +7523,16 @@ fn cached_current_quota_snapshot(now_ms: i64) -> Option<(AccountQuota, i64)> {
     Some((quota, age_ms))
 }
 
-fn update_current_quota_runtime_cache(quota: &AccountQuota, now_ms: i64) {
-    if let Ok(mut cache) = current_quota_runtime_cache().lock() {
+fn cached_current_quota_snapshot(now_ms: i64) -> Option<(AccountQuota, i64)> {
+    cached_quota_snapshot_for_cache(current_quota_runtime_cache(), now_ms)
+}
+
+fn cached_opencode_quota_snapshot(now_ms: i64) -> Option<(AccountQuota, i64)> {
+    cached_quota_snapshot_for_cache(opencode_current_quota_runtime_cache(), now_ms)
+}
+
+fn update_quota_runtime_cache(cache: &Mutex<CurrentQuotaRuntimeCache>, quota: &AccountQuota, now_ms: i64) {
+    if let Ok(mut cache) = cache.lock() {
         cache.quota = Some(quota.clone());
         cache.fetched_at_ms = now_ms;
         cache.last_error = None;
@@ -7446,18 +7540,31 @@ fn update_current_quota_runtime_cache(quota: &AccountQuota, now_ms: i64) {
     }
 }
 
-fn mark_current_quota_runtime_error(err: &str, now_ms: i64) {
-    if let Ok(mut cache) = current_quota_runtime_cache().lock() {
+fn update_current_quota_runtime_cache(quota: &AccountQuota, now_ms: i64) {
+    update_quota_runtime_cache(current_quota_runtime_cache(), quota, now_ms);
+}
+
+fn update_opencode_quota_runtime_cache(quota: &AccountQuota, now_ms: i64) {
+    update_quota_runtime_cache(opencode_current_quota_runtime_cache(), quota, now_ms);
+}
+
+fn mark_quota_runtime_error(cache: &Mutex<CurrentQuotaRuntimeCache>, err: &str, now_ms: i64) {
+    if let Ok(mut cache) = cache.lock() {
         cache.last_error = Some(err.to_string());
         cache.last_error_at_ms = now_ms;
     }
 }
 
-fn cached_quota_matches_live_workspace(codex_home: &Path, quota: &AccountQuota) -> bool {
-    let (_, live_workspace_id) =
-        read_workspace_info_from_auth_file(&codex_home.join(AUTH_FILE_NAME));
-    let live = live_workspace_id
-        .as_deref()
+fn mark_current_quota_runtime_error(err: &str, now_ms: i64) {
+    mark_quota_runtime_error(current_quota_runtime_cache(), err, now_ms);
+}
+
+fn mark_opencode_quota_runtime_error(err: &str, now_ms: i64) {
+    mark_quota_runtime_error(opencode_current_quota_runtime_cache(), err, now_ms);
+}
+
+fn cached_quota_matches_workspace_id(quota: &AccountQuota, workspace_id: Option<&str>) -> bool {
+    let live = workspace_id
         .map(str::trim)
         .unwrap_or("")
         .to_string();
@@ -7471,6 +7578,12 @@ fn cached_quota_matches_live_workspace(codex_home: &Path, quota: &AccountQuota) 
         return true;
     }
     live.eq_ignore_ascii_case(&cached)
+}
+
+fn cached_quota_matches_live_workspace(codex_home: &Path, quota: &AccountQuota) -> bool {
+    let (_, live_workspace_id) =
+        read_workspace_info_from_auth_file(&codex_home.join(AUTH_FILE_NAME));
+    cached_quota_matches_workspace_id(quota, live_workspace_id.as_deref())
 }
 
 fn current_status_from_quota(store: &StoreData, quota: &AccountQuota) -> CurrentStatusView {
@@ -7525,12 +7638,79 @@ fn auto_sync_current_account_to_list(
     Ok(auto_name)
 }
 
+fn fetch_quota_from_opencode_profile_snapshot(
+    store: &StoreData,
+    workspace_id: Option<&str>,
+) -> CmdResult<AccountQuota> {
+    let profile_name = find_profile_name_by_identity_prefer_existing(store, workspace_id, None)
+        .ok_or_else(|| "OpenCode 当前账号未映射到已保存账号快照。".to_string())?;
+    let record = store
+        .profiles
+        .get(&profile_name)
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("账号记录缺失: {profile_name}"))?;
+    let snapshot_dir = record_snapshot_dir(&profile_name, record)?;
+    fetch_quota_from_codex_home(&snapshot_dir, false)
+}
+
+fn load_live_opencode_current_status(
+    store: &StoreData,
+    sync_current: bool,
+    now_ms: i64,
+) -> Option<CurrentStatusView> {
+    let live_workspace_id = live_opencode_workspace_id_internal();
+    let cached_quota = cached_opencode_quota_snapshot(now_ms).and_then(|(quota, age_ms)| {
+        if cached_quota_matches_workspace_id(&quota, live_workspace_id.as_deref()) {
+            Some((quota, age_ms))
+        } else {
+            None
+        }
+    });
+
+    let can_use_fresh_cached = !sync_current
+        && cached_quota
+            .as_ref()
+            .map(|(_, age_ms)| *age_ms <= CURRENT_QUOTA_CACHE_FRESH_MS)
+            .unwrap_or(false);
+    if can_use_fresh_cached {
+        return cached_quota
+            .as_ref()
+            .map(|(quota, _)| current_status_from_quota(store, quota));
+    }
+
+    let process_count = get_opencode_process_count_internal();
+    if process_count == 0 {
+        return cached_quota
+            .as_ref()
+            .map(|(quota, _)| current_status_from_quota(store, quota));
+    }
+
+    let quota_result = fetch_quota_from_live_opencode_auth().or_else(|primary_err| {
+        fetch_quota_from_opencode_profile_snapshot(store, live_workspace_id.as_deref())
+            .map_err(|fallback_err| format!("{primary_err}；快照回退失败: {fallback_err}"))
+    });
+
+    match quota_result {
+        Ok(quota) => {
+            update_opencode_quota_runtime_cache(&quota, now_ms);
+            Some(current_status_from_quota(store, &quota))
+        }
+        Err(err) => {
+            mark_opencode_quota_runtime_error(&err, now_ms);
+            cached_quota
+                .as_ref()
+                .map(|(quota, _)| current_status_from_quota(store, quota))
+        }
+    }
+}
+
 fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
     let mut store = load_store()?;
+    let now_ms = now_ts_ms();
     let mut current = None;
+    let opencode_current = load_live_opencode_current_status(&store, sync_current, now_ms);
     let mut current_error = None;
     let codex_home = codex_home()?;
-    let now_ms = now_ts_ms();
     let cached_quota = cached_current_quota_snapshot(now_ms).and_then(|(quota, age_ms)| {
         if cached_quota_matches_live_workspace(&codex_home, &quota) {
             Some((quota, age_ms))
@@ -7547,7 +7727,7 @@ fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
     if can_use_fresh_cached {
         if let Some((quota, _)) = cached_quota.as_ref() {
             current = Some(current_status_from_quota(&store, quota));
-            return Ok(build_dashboard(&store, current, current_error));
+            return Ok(build_dashboard(&store, current, opencode_current, current_error));
         }
     }
 
@@ -7576,7 +7756,7 @@ fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
             }
         }
     }
-    Ok(build_dashboard(&store, current, current_error))
+    Ok(build_dashboard(&store, current, opencode_current, current_error))
 }
 
 fn save_current_profile_internal(profile_name: &str) -> CmdResult<DashboardData> {
@@ -8844,6 +9024,22 @@ fn count_unix_processes_by_name(proc_name: &str) -> u64 {
         .count() as u64
 }
 
+fn get_opencode_process_count_internal() -> u64 {
+    #[cfg(target_os = "windows")]
+    {
+        let counts =
+            count_windows_processes_by_images(&["OpenCode.exe", "opencode-cli.exe", "opencode.exe"]);
+        return counts.values().sum::<u64>();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        count_unix_processes_by_name("OpenCode")
+            + count_unix_processes_by_name("opencode")
+            + count_unix_processes_by_name("opencode-cli")
+    }
+}
+
 fn get_vscode_status_internal() -> VsCodeStatusView {
     #[cfg(target_os = "windows")]
     let process_count = {
@@ -9648,12 +9844,18 @@ fn get_opencode_monitor_status_internal() -> OpenCodeMonitorStatusView {
         .ok()
         .and_then(|path| read_openai_entry_from_opencode_auth_file(&path))
         .is_some();
+    let process_count = get_opencode_process_count_internal();
+    let running = process_count > 0;
 
     let mut log_ready = false;
     let mut log_recent = false;
     let mut last_log_age_ms: Option<i64> = None;
     let mut activity_source: Option<String> = None;
     let mut activity_candidates: Vec<(i64, &'static str)> = Vec::new();
+
+    if running {
+        activity_candidates.push((0, "process"));
+    }
 
     if let Some(path) = find_latest_opencode_log_file() {
         log_ready = true;
@@ -9693,6 +9895,8 @@ fn get_opencode_monitor_status_internal() -> OpenCodeMonitorStatusView {
 
     OpenCodeMonitorStatusView {
         auth_ready,
+        running,
+        process_count,
         log_ready,
         log_recent,
         last_log_age_ms,
@@ -10838,7 +11042,7 @@ fn fmt_reset(ts: Option<i64>) -> String {
 }
 
 #[tauri::command]
-async fn load_dashboard(sync_current: Option<bool>) -> CmdResult<DashboardData> {
+async fn load_dashboard(sync_current: Option<bool>, _mode: Option<String>) -> CmdResult<DashboardData> {
     let sync_current = sync_current.unwrap_or(true);
     tauri::async_runtime::spawn_blocking(move || load_dashboard_internal(sync_current))
         .await
