@@ -5,6 +5,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use rand::{thread_rng, Rng, RngCore};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -25,6 +26,10 @@ use std::time::{Duration, Instant, SystemTime};
 use tar::{Archive, Builder, Header};
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
+use toml_edit::{
+    Array as TomlEditArray, DocumentMut as TomlEditDocument, InlineTable as TomlEditInlineTable,
+    Item as TomlEditItem, Table as TomlEditTable, Value as TomlEditValue,
+};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -42,6 +47,8 @@ const AUTH_FILE_NAME: &str = "auth.json";
 const CAP_SID_FILE_NAME: &str = "cap_sid";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const SWITCHER_HOME_DIR: &str = ".codex_account_switcher";
+const CC_SWITCH_HOME_DIR: &str = ".cc-switch";
+const CC_SWITCH_DB_FILE_NAME: &str = "cc-switch.db";
 const PROFILES_FILE_NAME: &str = "profiles.json";
 const PROFILES_DIR_NAME: &str = "profiles";
 const BACKUPS_DIR_NAME: &str = "backups";
@@ -56,10 +63,12 @@ const PROFILE_SUPPORT_OPENCODE_KEY: &str = "opencode";
 const OPENCODE_PROVIDER_ID: &str = "openai";
 const OPENCODE_OPENAI_SNAPSHOT_FILE_NAME: &str = "opencode.openai.json";
 const OPENCODE_AUTH_BACKUP_FILE_NAME: &str = "opencode.auth.json";
+const OPENCODE_CONFIG_FILE_NAME: &str = "opencode.json";
+const OPENCODE_CONFIG_SCHEMA_URL: &str = "https://opencode.ai/config.json";
 const AGENTS_HOME_DIR: &str = ".agents";
 const SKILLS_DIR_NAME: &str = "skills";
 const SKILL_MANIFEST_FILE_NAME: &str = "SKILL.md";
-const SKILL_TARGETS_FILE_NAME: &str = "skill-targets.json";
+const SKILL_DISCOVERY_COMPARE_MIN_INTERVAL_SECS: i64 = 20;
 const LOGIN_WEBVIEW_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
 const WORKSPACE_CAPTURE_TITLE_PREFIX: &str = "__CODEX_WS__";
@@ -406,10 +415,13 @@ struct OpenCodeMonitorStatusView {
 #[serde(rename_all = "camelCase")]
 struct SkillEntryView {
     id: String,
+    directory: String,
     name: String,
     description: String,
     codex_enabled: bool,
     opencode_enabled: bool,
+    codex_available: bool,
+    opencode_available: bool,
     source: String,
     locations: Vec<String>,
 }
@@ -423,30 +435,122 @@ struct SkillsCatalogView {
     skills: Vec<SkillEntryView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SkillTargets {
-    codex: bool,
-    opencode: bool,
+struct DiscoverSkillRepoView {
+    owner: String,
+    name: String,
+    branch: String,
+    enabled: bool,
 }
 
-impl Default for SkillTargets {
-    fn default() -> Self {
-        Self {
-            codex: true,
-            opencode: true,
-        }
-    }
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoverSkillEntryView {
+    id: String,
+    name: String,
+    description: String,
+    directory: String,
+    repo_directory: String,
+    repo_owner: String,
+    repo_name: String,
+    repo_branch: String,
+    readme_url: String,
+    installed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillsDiscoveryView {
+    total: usize,
+    repos: Vec<DiscoverSkillRepoView>,
+    skills: Vec<DiscoverSkillEntryView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillRepoManageItemView {
+    owner: String,
+    name: String,
+    branch: String,
+    enabled: bool,
+    skill_count: Option<usize>,
+    repo_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillRepoManageView {
+    repos: Vec<SkillRepoManageItemView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerView {
+    id: String,
+    name: String,
+    description: String,
+    doc_url: Option<String>,
+    endpoint_url: Option<String>,
+    source: String,
+    kind: String,
+    codex_enabled: bool,
+    opencode_enabled: bool,
+    codex_available: bool,
+    opencode_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpManageView {
+    total: usize,
+    codex_enabled_count: usize,
+    opencode_enabled_count: usize,
+    servers: Vec<McpServerView>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SkillRepoCacheMeta {
+    head_sha: Option<String>,
+    skill_count: usize,
+    checked_at: i64,
 }
 
 #[derive(Debug, Clone, Default)]
 struct SkillScanEntry {
     id: String,
+    directory: String,
     name: String,
     description: String,
+    ssot_source: bool,
     codex_source: bool,
     opencode_source: bool,
+    opencode_legacy_source: bool,
     locations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct UnifiedMcpEntry {
+    id: String,
+    codex_spec: Option<Value>,
+    opencode_spec: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct CcSwitchSkillDbRow {
+    id: String,
+    directory: String,
+    name: String,
+    description: Option<String>,
+    repo_owner: Option<String>,
+    repo_name: Option<String>,
+    repo_branch: Option<String>,
+    readme_url: Option<String>,
+    enabled_claude: bool,
+    enabled_codex: bool,
+    enabled_gemini: bool,
+    enabled_opencode: bool,
+    installed_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -696,11 +800,39 @@ fn codex_skills_dir() -> CmdResult<PathBuf> {
 }
 
 fn opencode_skills_dir() -> CmdResult<PathBuf> {
+    Ok(home_dir()?
+        .join(".config")
+        .join("opencode")
+        .join(SKILLS_DIR_NAME))
+}
+
+fn opencode_legacy_skills_dir() -> CmdResult<PathBuf> {
     Ok(agents_home()?.join(SKILLS_DIR_NAME))
 }
 
-fn skill_targets_file() -> CmdResult<PathBuf> {
-    Ok(switcher_home()?.join(SKILL_TARGETS_FILE_NAME))
+fn opencode_skills_target_dirs() -> CmdResult<Vec<PathBuf>> {
+    let mut dirs = vec![opencode_skills_dir()?];
+    let legacy = opencode_legacy_skills_dir()?;
+    if !dirs.iter().any(|d| d == &legacy) {
+        dirs.push(legacy);
+    }
+    Ok(dirs)
+}
+
+fn cc_switch_home() -> CmdResult<PathBuf> {
+    Ok(home_dir()?.join(CC_SWITCH_HOME_DIR))
+}
+
+fn ccswitch_ssot_skills_dir() -> CmdResult<PathBuf> {
+    Ok(cc_switch_home()?.join(SKILLS_DIR_NAME))
+}
+
+fn legacy_switcher_skills_dir() -> CmdResult<PathBuf> {
+    Ok(switcher_home()?.join(SKILLS_DIR_NAME))
+}
+
+fn ccswitch_db_file() -> CmdResult<PathBuf> {
+    Ok(cc_switch_home()?.join(CC_SWITCH_DB_FILE_NAME))
 }
 
 fn normalize_skill_id(raw: &str) -> String {
@@ -814,32 +946,93 @@ fn parse_skill_manifest(skill_dir: &Path) -> (String, String) {
     (name, description)
 }
 
-fn read_skill_targets_map() -> CmdResult<BTreeMap<String, SkillTargets>> {
-    let file = skill_targets_file()?;
-    if !file.exists() {
-        return Ok(BTreeMap::new());
+fn parse_skill_manifest_text(text: &str, fallback_name: &str) -> (String, String) {
+    let mut name = fallback_name.to_string();
+    let mut description = String::new();
+    let mut body_start_idx = 0usize;
+    let lines: Vec<&str> = text.lines().collect();
+
+    if lines.first().map(|line| line.trim()) == Some("---") {
+        for (idx, line) in lines.iter().enumerate().skip(1) {
+            let trimmed = line.trim();
+            if trimmed == "---" {
+                body_start_idx = idx.saturating_add(1);
+                break;
+            }
+            if let Some(rest) = trimmed.strip_prefix("name:") {
+                let value = trim_wrapping_quotes(rest);
+                if !value.is_empty() {
+                    name = value;
+                }
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("description:") {
+                let value = trim_wrapping_quotes(rest);
+                if !value.is_empty() {
+                    description = value;
+                }
+                continue;
+            }
+        }
     }
-    let text = fs::read_to_string(&file)
-        .map_err(|e| format!("读取技能开关配置失败 {}: {e}", file.display()))?;
-    if text.trim().is_empty() {
-        return Ok(BTreeMap::new());
+
+    if description.is_empty() {
+        let mut parts: Vec<String> = Vec::new();
+        for line in lines.iter().skip(body_start_idx) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                if !parts.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            if trimmed.starts_with('#')
+                || trimmed.starts_with("```")
+                || trimmed.starts_with('|')
+                || trimmed.starts_with("- ")
+                || trimmed.starts_with("* ")
+            {
+                if !parts.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            parts.push(trimmed.to_string());
+            if parts.join(" ").len() >= 260 {
+                break;
+            }
+        }
+        description = parts.join(" ").trim().to_string();
     }
-    serde_json::from_str::<BTreeMap<String, SkillTargets>>(&text)
-        .map_err(|e| format!("解析技能开关配置失败 {}: {e}", file.display()))
+
+    if description.is_empty() {
+        description = "未提供描述".to_string();
+    }
+    (name, description)
 }
 
-fn write_skill_targets_map(map: &BTreeMap<String, SkillTargets>) -> CmdResult<()> {
-    fs::create_dir_all(switcher_home()?).map_err(|e| format!("创建目录失败: {e}"))?;
-    let file = skill_targets_file()?;
-    let text =
-        serde_json::to_string_pretty(map).map_err(|e| format!("序列化技能开关配置失败: {e}"))?;
-    fs::write(&file, format!("{text}\n"))
-        .map_err(|e| format!("写入技能开关配置失败 {}: {e}", file.display()))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillScanSource {
+    Ssot,
+    Codex,
+    OpenCode,
+    OpenCodeLegacy,
+}
+
+fn is_skill_dir(path: &Path) -> bool {
+    path.is_dir() && path.join(SKILL_MANIFEST_FILE_NAME).exists()
+}
+
+fn add_skill_location(entry: &mut SkillScanEntry, path: &Path) {
+    let location = path.to_string_lossy().to_string();
+    if !entry.locations.iter().any(|item| item == &location) {
+        entry.locations.push(location);
+    }
 }
 
 fn scan_skill_root(
     root: &Path,
-    source: &str,
+    source: SkillScanSource,
     merged: &mut BTreeMap<String, SkillScanEntry>,
 ) -> CmdResult<()> {
     if !root.exists() {
@@ -862,78 +1055,1597 @@ fn scan_skill_root(
         if dir_name.starts_with('.') {
             continue;
         }
-        if !path.join(SKILL_MANIFEST_FILE_NAME).exists() {
+        if !is_skill_dir(&path) {
             continue;
         }
         let (name, description) = parse_skill_manifest(&path);
-        let base_id = if name.trim().is_empty() {
-            dir_name.to_string()
-        } else {
-            name.clone()
-        };
-        let id = normalize_skill_id(&base_id);
-        if id.is_empty() {
-            continue;
-        }
-
-        let row = merged.entry(id.clone()).or_insert_with(|| SkillScanEntry {
-            id: id.clone(),
+        let key = dir_name.to_lowercase();
+        let row = merged.entry(key).or_insert_with(|| SkillScanEntry {
+            id: dir_name.to_string(),
+            directory: dir_name.to_string(),
             name: name.clone(),
             description: description.clone(),
+            ssot_source: false,
             codex_source: false,
             opencode_source: false,
+            opencode_legacy_source: false,
             locations: Vec::new(),
         });
+        if row.directory.trim().is_empty() {
+            row.directory = dir_name.to_string();
+        }
+        if row.id.trim().is_empty() {
+            row.id = dir_name.to_string();
+        }
         if row.name.trim().is_empty() {
             row.name = name.clone();
         }
         if row.description.trim().is_empty() {
             row.description = description.clone();
         }
-        if source == "codex" {
-            row.codex_source = true;
+        match source {
+            SkillScanSource::Ssot => row.ssot_source = true,
+            SkillScanSource::Codex => row.codex_source = true,
+            SkillScanSource::OpenCode => row.opencode_source = true,
+            SkillScanSource::OpenCodeLegacy => row.opencode_legacy_source = true,
         }
-        if source == "opencode" {
-            row.opencode_source = true;
-        }
-
-        let location = path.to_string_lossy().to_string();
-        if !row.locations.iter().any(|item| item == &location) {
-            row.locations.push(location);
-        }
+        add_skill_location(row, &path);
     }
     Ok(())
 }
 
 fn skill_source_label(entry: &SkillScanEntry) -> String {
-    match (entry.codex_source, entry.opencode_source) {
-        (true, true) => "Codex+OpenCode".to_string(),
-        (true, false) => "Codex".to_string(),
-        (false, true) => "OpenCode".to_string(),
-        _ => "Local".to_string(),
+    let mut parts: Vec<&str> = Vec::new();
+    if entry.ssot_source {
+        parts.push("CCSwitch");
+    }
+    if entry.codex_source {
+        parts.push("Codex");
+    }
+    if entry.opencode_source || entry.opencode_legacy_source {
+        parts.push("OpenCode");
+    }
+    if parts.is_empty() {
+        "Local".to_string()
+    } else {
+        parts.join("+")
     }
 }
 
-fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
-    let mut merged: BTreeMap<String, SkillScanEntry> = BTreeMap::new();
-    scan_skill_root(&codex_skills_dir()?, "codex", &mut merged)?;
-    scan_skill_root(&opencode_skills_dir()?, "opencode", &mut merged)?;
+fn copy_dir_recursive(src: &Path, dest: &Path) -> CmdResult<()> {
+    if !src.is_dir() {
+        return Err(format!("复制 Skills 目录失败，源目录不存在: {}", src.display()));
+    }
+    fs::create_dir_all(dest).map_err(|e| format!("创建目录失败 {}: {e}", dest.display()))?;
 
-    let targets_map = read_skill_targets_map()?;
+    let entries = fs::read_dir(src).map_err(|e| format!("读取目录失败 {}: {e}", src.display()))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        let ty = entry.file_type().map_err(|e| {
+            format!(
+                "读取目录条目类型失败 {}: {e}",
+                from.to_string_lossy().to_string()
+            )
+        })?;
+        if ty.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+            continue;
+        }
+        if ty.is_file() {
+            fs::copy(&from, &to)
+                .map_err(|e| format!("复制文件失败 {} -> {}: {e}", from.display(), to.display()))?;
+            continue;
+        }
+        if ty.is_symlink() {
+            let target = fs::read_link(&from)
+                .map_err(|e| format!("读取符号链接失败 {}: {e}", from.display()))?;
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                from.parent().unwrap_or(src).join(target)
+            };
+            if resolved.is_dir() {
+                copy_dir_recursive(&resolved, &to)?;
+            } else if resolved.is_file() {
+                fs::copy(&resolved, &to).map_err(|e| {
+                    format!(
+                        "复制符号链接目标失败 {} -> {}: {e}",
+                        resolved.display(),
+                        to.display()
+                    )
+                })?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn is_symlink(path: &Path) -> bool {
+    path.symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn path_exists_or_symlink(path: &Path) -> bool {
+    path.exists() || is_symlink(path)
+}
+
+fn remove_path_safe(path: &Path) -> CmdResult<()> {
+    if !path_exists_or_symlink(path) {
+        return Ok(());
+    }
+    if is_symlink(path) {
+        #[cfg(unix)]
+        {
+            fs::remove_file(path).map_err(|e| format!("删除符号链接失败 {}: {e}", path.display()))?;
+        }
+        #[cfg(windows)]
+        {
+            if let Err(dir_err) = fs::remove_dir(path) {
+                fs::remove_file(path).map_err(|file_err| {
+                    format!(
+                        "删除符号链接失败 {}: {dir_err}; {file_err}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+        return Ok(());
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|e| format!("删除目录失败 {}: {e}", path.display()))?;
+        return Ok(());
+    }
+    fs::remove_file(path).map_err(|e| format!("删除文件失败 {}: {e}", path.display()))
+}
+
+#[cfg(unix)]
+fn create_dir_symlink(source: &Path, dest: &Path) -> CmdResult<()> {
+    std::os::unix::fs::symlink(source, dest)
+        .map_err(|e| format!("创建符号链接失败 {} -> {}: {e}", source.display(), dest.display()))
+}
+
+#[cfg(windows)]
+fn create_dir_symlink(source: &Path, dest: &Path) -> CmdResult<()> {
+    std::os::windows::fs::symlink_dir(source, dest)
+        .map_err(|e| format!("创建符号链接失败 {} -> {}: {e}", source.display(), dest.display()))
+}
+
+fn ensure_ccswitch_ssot_seeded() -> CmdResult<()> {
+    let ssot = ccswitch_ssot_skills_dir()?;
+    fs::create_dir_all(&ssot).map_err(|e| format!("创建 Skills 中心目录失败 {}: {e}", ssot.display()))?;
+
+    let legacy = legacy_switcher_skills_dir()?;
+    if !legacy.exists() {
+        return Ok(());
+    }
+
+    let entries = match fs::read_dir(&legacy) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if !is_skill_dir(&path) {
+            continue;
+        }
+        let dir_name = entry.file_name();
+        let dest = ssot.join(&dir_name);
+        if is_skill_dir(&dest) {
+            continue;
+        }
+        if path_exists_or_symlink(&dest) {
+            remove_path_safe(&dest)?;
+        }
+        copy_dir_recursive(&path, &dest)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_skill_in_ssot(directory: &str) -> CmdResult<PathBuf> {
+    let ssot = ccswitch_ssot_skills_dir()?;
+    fs::create_dir_all(&ssot).map_err(|e| format!("创建 Skills 中心目录失败 {}: {e}", ssot.display()))?;
+
+    let dest = ssot.join(directory);
+    if is_skill_dir(&dest) {
+        return Ok(dest);
+    }
+
+    let candidate_roots = vec![
+        legacy_switcher_skills_dir()?,
+        codex_skills_dir()?,
+        opencode_skills_dir()?,
+        opencode_legacy_skills_dir()?,
+    ];
+
+    for root in candidate_roots {
+        let candidate = root.join(directory);
+        if !is_skill_dir(&candidate) {
+            continue;
+        }
+        if path_exists_or_symlink(&dest) {
+            remove_path_safe(&dest)?;
+        }
+        copy_dir_recursive(&candidate, &dest)?;
+        return Ok(dest);
+    }
+
+    Err(format!("未找到可用于同步的 Skill 源目录: {directory}"))
+}
+
+fn sync_skill_to_target_dir(directory: &str, target_root: &Path) -> CmdResult<()> {
+    let ssot_skill = ensure_skill_in_ssot(directory)?;
+    fs::create_dir_all(target_root)
+        .map_err(|e| format!("创建 Skills 目录失败 {}: {e}", target_root.display()))?;
+    let target_skill = target_root.join(directory);
+    if path_exists_or_symlink(&target_skill) {
+        remove_path_safe(&target_skill)?;
+    }
+
+    match create_dir_symlink(&ssot_skill, &target_skill) {
+        Ok(()) => Ok(()),
+        Err(_) => copy_dir_recursive(&ssot_skill, &target_skill),
+    }
+}
+
+fn remove_skill_from_target_dir(directory: &str, target_root: &Path) -> CmdResult<()> {
+    let target_skill = target_root.join(directory);
+    remove_path_safe(&target_skill)
+}
+
+fn ccswitch_db_has_skills_table(conn: &Connection) -> CmdResult<bool> {
+    let exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='skills'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("读取 CC Switch skills 表失败: {e}"))?;
+    Ok(exists > 0)
+}
+
+fn ccswitch_db_has_skill_repos_table(conn: &Connection) -> CmdResult<bool> {
+    let exists = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='skill_repos'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("读取 CC Switch skill_repos 表失败: {e}"))?;
+    Ok(exists > 0)
+}
+
+fn ccswitch_ensure_skill_repos_table(conn: &Connection) -> CmdResult<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS skill_repos (
+            owner TEXT NOT NULL,
+            name TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            PRIMARY KEY (owner, name)
+        )",
+        [],
+    )
+    .map_err(|e| format!("创建 CC Switch skill_repos 表失败: {e}"))?;
+    Ok(())
+}
+
+fn ccswitch_ensure_skill_repo_cache_tables(conn: &Connection) -> CmdResult<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS skill_repo_cache (
+            owner TEXT NOT NULL,
+            name TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            head_sha TEXT,
+            skill_count INTEGER NOT NULL DEFAULT 0,
+            checked_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (owner, name, branch)
+        )",
+        [],
+    )
+    .map_err(|e| format!("创建 CC Switch skill_repo_cache 表失败: {e}"))?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS skill_repo_skill_cache (
+            owner TEXT NOT NULL,
+            name TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            repo_directory TEXT NOT NULL,
+            local_directory TEXT NOT NULL,
+            skill_id TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            skill_description TEXT NOT NULL,
+            readme_url TEXT NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (owner, name, branch, repo_directory)
+        )",
+        [],
+    )
+    .map_err(|e| format!("创建 CC Switch skill_repo_skill_cache 表失败: {e}"))?;
+    Ok(())
+}
+
+fn ccswitch_find_skill_by_directory(
+    conn: &Connection,
+    directory: &str,
+) -> CmdResult<Option<CcSwitchSkillDbRow>> {
+    conn.query_row(
+        "SELECT id, directory, name, description, repo_owner, repo_name, repo_branch, readme_url,
+                enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, installed_at
+         FROM skills
+         WHERE lower(directory)=lower(?1)
+         ORDER BY installed_at DESC
+         LIMIT 1",
+        params![directory],
+        |row| {
+            Ok(CcSwitchSkillDbRow {
+                id: row.get(0)?,
+                directory: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                repo_owner: row.get(4)?,
+                repo_name: row.get(5)?,
+                repo_branch: row.get(6)?,
+                readme_url: row.get(7)?,
+                enabled_claude: row.get(8)?,
+                enabled_codex: row.get(9)?,
+                enabled_gemini: row.get(10)?,
+                enabled_opencode: row.get(11)?,
+                installed_at: row.get(12)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| format!("查询 CC Switch skill 记录失败: {e}"))
+}
+
+fn ccswitch_find_skill_by_readme(
+    conn: &Connection,
+    repo_owner: &str,
+    repo_name: &str,
+    readme_url: &str,
+) -> CmdResult<Option<CcSwitchSkillDbRow>> {
+    conn.query_row(
+        "SELECT id, directory, name, description, repo_owner, repo_name, repo_branch, readme_url,
+                enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, installed_at
+         FROM skills
+         WHERE lower(repo_owner)=lower(?1)
+           AND lower(repo_name)=lower(?2)
+           AND lower(readme_url)=lower(?3)
+         ORDER BY installed_at DESC
+         LIMIT 1",
+        params![repo_owner, repo_name, readme_url],
+        |row| {
+            Ok(CcSwitchSkillDbRow {
+                id: row.get(0)?,
+                directory: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                repo_owner: row.get(4)?,
+                repo_name: row.get(5)?,
+                repo_branch: row.get(6)?,
+                readme_url: row.get(7)?,
+                enabled_claude: row.get(8)?,
+                enabled_codex: row.get(9)?,
+                enabled_gemini: row.get(10)?,
+                enabled_opencode: row.get(11)?,
+                installed_at: row.get(12)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| format!("查询 CC Switch readme skill 记录失败: {e}"))
+}
+
+fn ccswitch_load_installed_readme_urls(conn: &Connection) -> CmdResult<HashSet<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT lower(readme_url) FROM skills
+             WHERE readme_url IS NOT NULL AND trim(readme_url) <> ''",
+        )
+        .map_err(|e| format!("读取 CC Switch readme 列失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("遍历 CC Switch readme 列失败: {e}"))?;
+    let mut out = HashSet::new();
+    for item in rows {
+        let value = item.map_err(|e| format!("解析 CC Switch readme 值失败: {e}"))?;
+        if !value.trim().is_empty() {
+            out.insert(value);
+        }
+    }
+    Ok(out)
+}
+
+fn ccswitch_load_repo_cache_meta(
+    conn: &Connection,
+    repo: &DiscoverSkillRepoView,
+) -> CmdResult<Option<SkillRepoCacheMeta>> {
+    conn.query_row(
+        "SELECT head_sha, skill_count, checked_at
+         FROM skill_repo_cache
+         WHERE owner = ?1 AND name = ?2 AND branch = ?3
+         LIMIT 1",
+        params![repo.owner, repo.name, repo.branch],
+        |row| {
+            let skill_count_raw: i64 = row.get(1)?;
+            Ok(SkillRepoCacheMeta {
+                head_sha: row.get(0)?,
+                skill_count: if skill_count_raw < 0 {
+                    0
+                } else {
+                    skill_count_raw as usize
+                },
+                checked_at: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| format!("读取仓库缓存元数据失败 {}/{}: {e}", repo.owner, repo.name))
+}
+
+fn ccswitch_touch_repo_cache_checked(
+    conn: &Connection,
+    repo: &DiscoverSkillRepoView,
+    head_sha: Option<&str>,
+    skill_count: usize,
+) -> CmdResult<()> {
+    let now_ts = Local::now().timestamp();
+    conn.execute(
+        "INSERT INTO skill_repo_cache (owner, name, branch, head_sha, skill_count, checked_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(owner, name, branch)
+         DO UPDATE SET
+             head_sha = COALESCE(excluded.head_sha, skill_repo_cache.head_sha),
+             skill_count = excluded.skill_count,
+             checked_at = excluded.checked_at",
+        params![
+            repo.owner,
+            repo.name,
+            repo.branch,
+            head_sha.map(|v| v.to_string()),
+            skill_count as i64,
+            now_ts,
+            now_ts,
+        ],
+    )
+    .map_err(|e| format!("更新仓库缓存检测时间失败 {}/{}: {e}", repo.owner, repo.name))?;
+    Ok(())
+}
+
+fn ccswitch_replace_repo_cache(
+    conn: &Connection,
+    repo: &DiscoverSkillRepoView,
+    head_sha: Option<&str>,
+    skills: &[DiscoverSkillEntryView],
+) -> CmdResult<()> {
+    let now_ts = Local::now().timestamp();
+    let mut keep_dirs: HashSet<String> = HashSet::new();
+    for skill in skills {
+        keep_dirs.insert(skill.repo_directory.to_lowercase());
+        conn.execute(
+            "INSERT INTO skill_repo_skill_cache
+             (owner, name, branch, repo_directory, local_directory, skill_id, skill_name, skill_description, readme_url, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(owner, name, branch, repo_directory)
+             DO UPDATE SET
+                 local_directory = excluded.local_directory,
+                 skill_id = excluded.skill_id,
+                 skill_name = excluded.skill_name,
+                 skill_description = excluded.skill_description,
+                 readme_url = excluded.readme_url,
+                 updated_at = excluded.updated_at",
+            params![
+                repo.owner,
+                repo.name,
+                repo.branch,
+                skill.repo_directory,
+                skill.directory,
+                skill.id,
+                skill.name,
+                skill.description,
+                skill.readme_url,
+                now_ts,
+            ],
+        )
+        .map_err(|e| format!("写入仓库技能缓存失败 {}/{}: {e}", repo.owner, repo.name))?;
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT repo_directory
+             FROM skill_repo_skill_cache
+             WHERE owner = ?1 AND name = ?2 AND branch = ?3",
+        )
+        .map_err(|e| format!("读取仓库技能缓存目录失败 {}/{}: {e}", repo.owner, repo.name))?;
+    let rows = stmt
+        .query_map(params![repo.owner, repo.name, repo.branch], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("遍历仓库技能缓存目录失败 {}/{}: {e}", repo.owner, repo.name))?;
+    let mut stale_dirs: Vec<String> = Vec::new();
+    for item in rows {
+        let old_dir = item.map_err(|e| format!("解析仓库技能缓存目录失败 {}/{}: {e}", repo.owner, repo.name))?;
+        if !keep_dirs.contains(&old_dir.to_lowercase()) {
+            stale_dirs.push(old_dir);
+        }
+    }
+    for stale in stale_dirs {
+        conn.execute(
+            "DELETE FROM skill_repo_skill_cache
+             WHERE owner = ?1 AND name = ?2 AND branch = ?3 AND repo_directory = ?4",
+            params![repo.owner, repo.name, repo.branch, stale],
+        )
+        .map_err(|e| format!("删除仓库过期技能缓存失败 {}/{}: {e}", repo.owner, repo.name))?;
+    }
+
+    conn.execute(
+        "INSERT INTO skill_repo_cache (owner, name, branch, head_sha, skill_count, checked_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(owner, name, branch)
+         DO UPDATE SET
+             head_sha = excluded.head_sha,
+             skill_count = excluded.skill_count,
+             checked_at = excluded.checked_at,
+             updated_at = excluded.updated_at",
+        params![
+            repo.owner,
+            repo.name,
+            repo.branch,
+            head_sha.map(|v| v.to_string()),
+            skills.len() as i64,
+            now_ts,
+            now_ts,
+        ],
+    )
+    .map_err(|e| format!("写入仓库缓存元数据失败 {}/{}: {e}", repo.owner, repo.name))?;
+    Ok(())
+}
+
+fn ccswitch_load_repo_cached_skills(
+    conn: &Connection,
+    repo: &DiscoverSkillRepoView,
+) -> CmdResult<Vec<DiscoverSkillEntryView>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT skill_id, skill_name, skill_description, local_directory, repo_directory, readme_url
+             FROM skill_repo_skill_cache
+             WHERE owner = ?1 AND name = ?2 AND branch = ?3
+             ORDER BY lower(skill_name) ASC",
+        )
+        .map_err(|e| format!("读取仓库技能缓存失败 {}/{}: {e}", repo.owner, repo.name))?;
+    let rows = stmt
+        .query_map(params![repo.owner, repo.name, repo.branch], |row| {
+            Ok(DiscoverSkillEntryView {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                directory: row.get(3)?,
+                repo_directory: row.get(4)?,
+                repo_owner: repo.owner.clone(),
+                repo_name: repo.name.clone(),
+                repo_branch: repo.branch.clone(),
+                readme_url: row.get(5)?,
+                installed: false,
+            })
+        })
+        .map_err(|e| format!("遍历仓库技能缓存失败 {}/{}: {e}", repo.owner, repo.name))?;
+    let mut out = Vec::new();
+    for item in rows {
+        out.push(item.map_err(|e| format!("解析仓库技能缓存行失败 {}/{}: {e}", repo.owner, repo.name))?);
+    }
+    Ok(out)
+}
+
+fn ccswitch_remove_repo_cache(conn: &Connection, owner: &str, name: &str) -> CmdResult<()> {
+    conn.execute(
+        "DELETE FROM skill_repo_skill_cache WHERE lower(owner)=lower(?1) AND lower(name)=lower(?2)",
+        params![owner, name],
+    )
+    .map_err(|e| format!("删除仓库技能缓存失败 {owner}/{name}: {e}"))?;
+    conn.execute(
+        "DELETE FROM skill_repo_cache WHERE lower(owner)=lower(?1) AND lower(name)=lower(?2)",
+        params![owner, name],
+    )
+    .map_err(|e| format!("删除仓库缓存元数据失败 {owner}/{name}: {e}"))?;
+    Ok(())
+}
+
+fn ccswitch_generate_local_skill_id(conn: &Connection, directory: &str) -> CmdResult<String> {
+    let raw = normalize_skill_id(directory);
+    let stem = if raw.trim().is_empty() {
+        "skill".to_string()
+    } else {
+        raw
+    };
+    let base = format!("local:{stem}");
+    let mut id = base.clone();
+    let mut seq: u32 = 2;
+    loop {
+        let existing_dir = conn
+            .query_row(
+                "SELECT directory FROM skills WHERE id = ?1 LIMIT 1",
+                params![id.clone()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| format!("检查 CC Switch skill id 冲突失败: {e}"))?;
+        match existing_dir {
+            None => return Ok(id),
+            Some(found) if found.eq_ignore_ascii_case(directory) => return Ok(id),
+            Some(_) => {
+                id = format!("{base}:{seq}");
+                seq = seq.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn ccswitch_upsert_skill_row(conn: &Connection, skill: &SkillEntryView) -> CmdResult<()> {
+    let existing = ccswitch_find_skill_by_directory(conn, &skill.directory)?;
+    let now_ts = Local::now().timestamp();
+    let description = if skill.description.trim().is_empty() {
+        None
+    } else {
+        Some(skill.description.clone())
+    };
+    let display_name = if skill.name.trim().is_empty() {
+        skill.directory.clone()
+    } else {
+        skill.name.clone()
+    };
+
+    if let Some(row) = existing {
+        let final_name = if display_name.trim().is_empty() {
+            row.name
+        } else {
+            display_name
+        };
+        let final_description = if description.is_some() {
+            description
+        } else {
+            row.description
+        };
+        conn.execute(
+            "UPDATE skills
+             SET name = ?1,
+                 description = ?2,
+                 directory = ?3,
+                 repo_owner = ?4,
+                 repo_name = ?5,
+                 repo_branch = ?6,
+                 readme_url = ?7,
+                 enabled_claude = ?8,
+                 enabled_codex = ?9,
+                 enabled_gemini = ?10,
+                 enabled_opencode = ?11,
+                 installed_at = ?12
+             WHERE id = ?13",
+            params![
+                final_name,
+                final_description,
+                skill.directory,
+                row.repo_owner,
+                row.repo_name,
+                row.repo_branch,
+                row.readme_url,
+                row.enabled_claude,
+                skill.codex_enabled,
+                row.enabled_gemini,
+                skill.opencode_enabled,
+                if row.installed_at > 0 {
+                    row.installed_at
+                } else {
+                    now_ts
+                },
+                row.id,
+            ],
+        )
+        .map_err(|e| format!("更新 CC Switch skill 记录失败: {e}"))?;
+        return Ok(());
+    }
+
+    let new_id = ccswitch_generate_local_skill_id(conn, &skill.directory)?;
+    conn.execute(
+        "INSERT INTO skills
+         (id, name, description, directory, repo_owner, repo_name, repo_branch, readme_url,
+          enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, installed_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, NULL, 'main', NULL, 0, ?5, 0, ?6, ?7)",
+        params![
+            new_id,
+            display_name,
+            description,
+            skill.directory,
+            skill.codex_enabled,
+            skill.opencode_enabled,
+            now_ts,
+        ],
+    )
+    .map_err(|e| format!("写入 CC Switch skill 记录失败: {e}"))?;
+    Ok(())
+}
+
+fn sanitize_local_skill_directory(raw: &str) -> String {
+    let leaf = Path::new(raw)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(raw);
+    let normalized = normalize_skill_id(leaf);
+    if normalized.trim().is_empty() {
+        "skill".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn choose_unique_skill_directory(base: &str, preferred_existing: Option<&str>) -> CmdResult<String> {
+    let ssot_root = ccswitch_ssot_skills_dir()?;
+    fs::create_dir_all(&ssot_root)
+        .map_err(|e| format!("创建 Skills 中心目录失败 {}: {e}", ssot_root.display()))?;
+
+    let stem = sanitize_local_skill_directory(base);
+    let mut candidate = stem.clone();
+    let mut suffix: u32 = 2;
+    loop {
+        let path = ssot_root.join(&candidate);
+        if !path_exists_or_symlink(&path) {
+            return Ok(candidate);
+        }
+        if let Some(existing) = preferred_existing {
+            if existing.eq_ignore_ascii_case(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        candidate = format!("{stem}-{suffix}");
+        suffix = suffix.saturating_add(1);
+        if suffix > 20_000 {
+            return Err("生成技能目录名失败，重名次数过多。".to_string());
+        }
+    }
+}
+
+fn download_repo_tarball_bytes(repo_owner: &str, repo_name: &str, repo_branch: &str) -> CmdResult<Vec<u8>> {
+    use reqwest::blocking::Client;
+
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/tarball/{}",
+        repo_owner, repo_name, repo_branch
+    );
+    let client = Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|e| format!("创建发现技能请求客户端失败: {e}"))?;
+    let response = client
+        .get(&url)
+        .header("User-Agent", "codex-switch-discovery")
+        .send()
+        .map_err(|e| format!("拉取仓库失败 {repo_owner}/{repo_name}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "拉取仓库失败 {repo_owner}/{repo_name}: HTTP {}",
+            response.status()
+        ));
+    }
+
+    response
+        .bytes()
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("读取仓库归档失败 {repo_owner}/{repo_name}: {e}"))
+}
+
+fn fetch_repo_branch_head_sha(repo: &DiscoverSkillRepoView) -> CmdResult<String> {
+    use reqwest::blocking::Client;
+
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/commits/{}",
+        repo.owner, repo.name, repo.branch
+    );
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("创建仓库比对请求客户端失败: {e}"))?;
+    let response = client
+        .get(&url)
+        .header("User-Agent", "codex-switch-discovery")
+        .send()
+        .map_err(|e| format!("读取仓库 HEAD 失败 {}/{}: {e}", repo.owner, repo.name))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "读取仓库 HEAD 失败 {}/{}: HTTP {}",
+            repo.owner,
+            repo.name,
+            response.status()
+        ));
+    }
+    let value: Value = response
+        .json()
+        .map_err(|e| format!("解析仓库 HEAD 响应失败 {}/{}: {e}", repo.owner, repo.name))?;
+    let sha = value
+        .get("sha")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if sha.is_empty() {
+        return Err(format!("仓库 HEAD 响应缺少 sha 字段 {}/{}", repo.owner, repo.name));
+    }
+    Ok(sha)
+}
+
+fn extract_discovery_skill_from_tarball(
+    payload: &[u8],
+    repo_directory: &str,
+    out_dir: &Path,
+) -> CmdResult<()> {
+    let decoder = GzDecoder::new(Cursor::new(payload.to_vec()));
+    let mut archive = Archive::new(decoder);
+    let repo_dir_norm = repo_directory.trim().trim_matches('/').replace('\\', "/");
+    let repo_parts: Vec<&str> = repo_dir_norm
+        .split('/')
+        .filter(|part| !part.trim().is_empty())
+        .collect();
+    let mut extracted_any = false;
+
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("解析仓库归档失败: {e}"))?;
+    for item in entries {
+        let mut entry = item.map_err(|e| format!("读取仓库条目失败: {e}"))?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| format!("读取仓库路径失败: {e}"))?;
+        let member = path_to_posix(path.as_ref());
+        let parts: Vec<&str> = member.split('/').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let inner_parts = &parts[1..];
+        let rel_parts: Vec<&str> = if repo_parts.is_empty() {
+            inner_parts.to_vec()
+        } else {
+            if inner_parts.len() <= repo_parts.len() {
+                continue;
+            }
+            if !repo_parts
+                .iter()
+                .enumerate()
+                .all(|(idx, part)| inner_parts[idx].eq_ignore_ascii_case(part))
+            {
+                continue;
+            }
+            inner_parts[repo_parts.len()..].to_vec()
+        };
+
+        if rel_parts.is_empty() {
+            continue;
+        }
+        if rel_parts
+            .iter()
+            .any(|part| *part == "." || *part == ".." || part.trim().is_empty())
+        {
+            continue;
+        }
+
+        let rel_path = rel_parts.join("/");
+        let out_path = out_dir.join(Path::new(&rel_path));
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("创建技能文件目录失败 {}: {e}", parent.display()))?;
+        }
+        let mut buf = Vec::new();
+        entry
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("读取技能文件失败 {member}: {e}"))?;
+        fs::write(&out_path, buf)
+            .map_err(|e| format!("写入技能文件失败 {}: {e}", out_path.display()))?;
+        extracted_any = true;
+    }
+
+    if !extracted_any {
+        return Err("未在仓库归档中找到可安装的技能文件。".to_string());
+    }
+    if !out_dir.join(SKILL_MANIFEST_FILE_NAME).exists() {
+        return Err("技能安装失败：目标目录缺少 SKILL.md。".to_string());
+    }
+    Ok(())
+}
+
+fn ccswitch_upsert_discovery_skill_row(
+    conn: &Connection,
+    directory: &str,
+    name: &str,
+    description: &str,
+    repo_owner: &str,
+    repo_name: &str,
+    repo_branch: &str,
+    readme_url: &str,
+) -> CmdResult<()> {
+    let existing = ccswitch_find_skill_by_directory(conn, directory)?;
+    let now_ts = Local::now().timestamp();
+    let display_name = if name.trim().is_empty() {
+        directory.to_string()
+    } else {
+        name.trim().to_string()
+    };
+    let description_opt = if description.trim().is_empty() {
+        None
+    } else {
+        Some(description.trim().to_string())
+    };
+
+    if let Some(row) = existing {
+        let final_name = if display_name.trim().is_empty() {
+            row.name
+        } else {
+            display_name
+        };
+        let final_description = if description_opt.is_some() {
+            description_opt
+        } else {
+            row.description
+        };
+        conn.execute(
+            "UPDATE skills
+             SET name = ?1,
+                 description = ?2,
+                 directory = ?3,
+                 repo_owner = ?4,
+                 repo_name = ?5,
+                 repo_branch = ?6,
+                 readme_url = ?7,
+                 enabled_claude = ?8,
+                 enabled_codex = ?9,
+                 enabled_gemini = ?10,
+                 enabled_opencode = ?11,
+                 installed_at = ?12
+             WHERE id = ?13",
+            params![
+                final_name,
+                final_description,
+                directory,
+                repo_owner,
+                repo_name,
+                repo_branch,
+                readme_url,
+                row.enabled_claude,
+                true,
+                row.enabled_gemini,
+                true,
+                if row.installed_at > 0 {
+                    row.installed_at
+                } else {
+                    now_ts
+                },
+                row.id,
+            ],
+        )
+        .map_err(|e| format!("更新发现技能 DB 记录失败: {e}"))?;
+        return Ok(());
+    }
+
+    let new_id = ccswitch_generate_local_skill_id(conn, directory)?;
+    conn.execute(
+        "INSERT INTO skills
+         (id, name, description, directory, repo_owner, repo_name, repo_branch, readme_url,
+          enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, installed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 1, 0, 1, ?9)",
+        params![
+            new_id,
+            display_name,
+            description_opt,
+            directory,
+            repo_owner,
+            repo_name,
+            repo_branch,
+            readme_url,
+            now_ts,
+        ],
+    )
+    .map_err(|e| format!("写入发现技能 DB 记录失败: {e}"))?;
+    Ok(())
+}
+
+fn install_discovery_skill_internal(
+    repo_owner: &str,
+    repo_name: &str,
+    repo_branch: &str,
+    repo_directory: &str,
+    local_directory: &str,
+    readme_url: &str,
+    name: &str,
+    description: &str,
+) -> CmdResult<SkillsCatalogView> {
+    let owner = repo_owner.trim();
+    let repo = repo_name.trim();
+    let branch = repo_branch.trim();
+    if owner.is_empty() || repo.is_empty() || branch.is_empty() {
+        return Err("安装失败：repo_owner/repo_name/repo_branch 不能为空。".to_string());
+    }
+
+    let source_dir = repo_directory.trim().trim_matches('/').replace('\\', "/");
+    let fallback_local_name = if local_directory.trim().is_empty() {
+        if source_dir.is_empty() {
+            repo.to_string()
+        } else {
+            Path::new(&source_dir)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(repo)
+                .to_string()
+        }
+    } else {
+        local_directory.trim().to_string()
+    };
+    let fallback_local_name = if fallback_local_name.trim().is_empty() {
+        sanitize_local_skill_directory(name)
+    } else {
+        fallback_local_name
+    };
+
+    let effective_readme = if readme_url.trim().is_empty() {
+        let doc_path = if source_dir.is_empty() {
+            SKILL_MANIFEST_FILE_NAME.to_string()
+        } else {
+            format!("{source_dir}/{SKILL_MANIFEST_FILE_NAME}")
+        };
+        build_skill_doc_url(owner, repo, branch, &doc_path)
+    } else {
+        readme_url.trim().to_string()
+    };
+
+    ensure_ccswitch_ssot_seeded()?;
+
+    let db_path = ccswitch_db_file()?;
+    let mut preferred_dir: Option<String> = None;
+    if db_path.exists() {
+        let conn = Connection::open(&db_path)
+            .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+        let _ = conn.busy_timeout(Duration::from_millis(1500));
+        if ccswitch_db_has_skills_table(&conn)? {
+            if let Some(row) = ccswitch_find_skill_by_readme(&conn, owner, repo, &effective_readme)? {
+                if !row.directory.trim().is_empty() {
+                    preferred_dir = Some(row.directory);
+                }
+            }
+        }
+    }
+
+    let target_directory = choose_unique_skill_directory(&fallback_local_name, preferred_dir.as_deref())?;
+    let payload = download_repo_tarball_bytes(owner, repo, branch)?;
+    let install_token = format!(
+        "{}-{}-{}",
+        sanitize_local_skill_directory(owner),
+        sanitize_local_skill_directory(repo),
+        Local::now().timestamp_millis()
+    );
+    let stage_root = env::temp_dir().join(format!("codex-switch-skill-install-{install_token}"));
+    let stage_skill_dir = stage_root.join(&target_directory);
+    if path_exists_or_symlink(&stage_root) {
+        let _ = remove_path_safe(&stage_root);
+    }
+    fs::create_dir_all(&stage_skill_dir)
+        .map_err(|e| format!("创建安装临时目录失败 {}: {e}", stage_skill_dir.display()))?;
+    extract_discovery_skill_from_tarball(&payload, &source_dir, &stage_skill_dir)?;
+
+    let ssot_root = ccswitch_ssot_skills_dir()?;
+    fs::create_dir_all(&ssot_root)
+        .map_err(|e| format!("创建 Skills 中心目录失败 {}: {e}", ssot_root.display()))?;
+    let target_skill_dir = ssot_root.join(&target_directory);
+    if path_exists_or_symlink(&target_skill_dir) {
+        remove_path_safe(&target_skill_dir)?;
+    }
+    if fs::rename(&stage_skill_dir, &target_skill_dir).is_err() {
+        copy_dir_recursive(&stage_skill_dir, &target_skill_dir)?;
+    }
+    let _ = fs::remove_dir_all(&stage_root);
+
+    sync_skill_to_target_dir(&target_directory, &codex_skills_dir()?)?;
+    for root in opencode_skills_target_dirs()? {
+        sync_skill_to_target_dir(&target_directory, &root)?;
+    }
+
+    if db_path.exists() {
+        let conn = Connection::open(&db_path)
+            .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+        let _ = conn.busy_timeout(Duration::from_millis(1500));
+        if ccswitch_db_has_skills_table(&conn)? {
+            ccswitch_upsert_discovery_skill_row(
+                &conn,
+                &target_directory,
+                name,
+                description,
+                owner,
+                repo,
+                branch,
+                &effective_readme,
+            )?;
+        }
+    }
+
+    load_skills_catalog_internal()
+}
+
+fn ccswitch_load_skill_repos(conn: &Connection) -> CmdResult<Vec<DiscoverSkillRepoView>> {
+    let mut stmt = conn
+        .prepare("SELECT owner, name, branch, enabled FROM skill_repos ORDER BY owner ASC, name ASC")
+        .map_err(|e| format!("读取 CC Switch skill_repos 失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DiscoverSkillRepoView {
+                owner: row.get(0)?,
+                name: row.get(1)?,
+                branch: row.get(2)?,
+                enabled: row.get(3)?,
+            })
+        })
+        .map_err(|e| format!("遍历 CC Switch skill_repos 失败: {e}"))?;
+    let mut repos = Vec::new();
+    for item in rows {
+        repos.push(item.map_err(|e| format!("解析 CC Switch skill_repos 行失败: {e}"))?);
+    }
+    Ok(repos)
+}
+
+fn normalize_repo_segment(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('/')
+        .trim_matches('\\')
+        .trim()
+        .to_string()
+}
+
+fn parse_repo_input(raw: &str) -> CmdResult<(String, String)> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("仓库 URL 不能为空。".to_string());
+    }
+    let normalized = text.replace('\\', "/");
+    let path = if let Some(rest) = normalized.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = normalized.strip_prefix("http://github.com/") {
+        rest
+    } else if let Some(rest) = normalized.strip_prefix("github.com/") {
+        rest
+    } else {
+        normalized.as_str()
+    };
+
+    let mut parts: Vec<&str> = path.split('/').filter(|part| !part.trim().is_empty()).collect();
+    if parts.len() < 2 {
+        return Err("仓库格式错误，请输入 owner/name 或 github 链接。".to_string());
+    }
+    let owner = normalize_repo_segment(parts[0]);
+    let mut name = normalize_repo_segment(parts[1]);
+    if name.ends_with(".git") {
+        name = name.trim_end_matches(".git").to_string();
+    }
+    if owner.is_empty() || name.is_empty() {
+        return Err("仓库格式错误，请输入 owner/name。".to_string());
+    }
+    parts.clear();
+    Ok((owner, name))
+}
+
+fn normalize_repo_branch(raw: Option<&str>) -> String {
+    let value = raw.unwrap_or("main").trim().to_string();
+    if value.is_empty() {
+        "main".to_string()
+    } else {
+        value
+    }
+}
+
+fn load_skill_repos_manage_internal(refresh_count: bool) -> CmdResult<SkillRepoManageView> {
+    let db_path = ccswitch_db_file()?;
+    if !db_path.exists() {
+        return Ok(SkillRepoManageView { repos: Vec::new() });
+    }
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    if !ccswitch_db_has_skill_repos_table(&conn)? {
+        return Ok(SkillRepoManageView { repos: Vec::new() });
+    }
+    ccswitch_ensure_skill_repo_cache_tables(&conn)?;
+
+    let repos = ccswitch_load_skill_repos(&conn)?;
+    let mut out: Vec<SkillRepoManageItemView> = Vec::new();
+    for repo in repos {
+        let mut skill_count = ccswitch_load_repo_cache_meta(&conn, &repo)?.map(|meta| meta.skill_count);
+        if refresh_count && repo.enabled {
+            match ccswitch_get_repo_discovery_skills(&conn, &repo, true, false) {
+                Ok(skills) => {
+                    skill_count = Some(skills.len());
+                }
+                Err(err) => {
+                    eprintln!(
+                        "仓库计数刷新失败 {}/{}@{}: {}",
+                        repo.owner, repo.name, repo.branch, err
+                    );
+                }
+            }
+        }
+        out.push(SkillRepoManageItemView {
+            owner: repo.owner.clone(),
+            name: repo.name.clone(),
+            branch: repo.branch.clone(),
+            enabled: repo.enabled,
+            skill_count,
+            repo_url: format!("https://github.com/{}/{}", repo.owner, repo.name),
+        });
+    }
+    Ok(SkillRepoManageView { repos: out })
+}
+
+fn add_skill_repo_internal(repo_input: &str, branch: Option<&str>) -> CmdResult<SkillRepoManageView> {
+    let (owner, name) = parse_repo_input(repo_input)?;
+    let branch = normalize_repo_branch(branch);
+
+    let db_path = ccswitch_db_file()?;
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 CC Switch 目录失败 {}: {e}", parent.display()))?;
+    }
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    ccswitch_ensure_skill_repos_table(&conn)?;
+    ccswitch_ensure_skill_repo_cache_tables(&conn)?;
+    conn.execute(
+        "INSERT INTO skill_repos (owner, name, branch, enabled)
+         VALUES (?1, ?2, ?3, 1)
+         ON CONFLICT(owner, name)
+         DO UPDATE SET branch = excluded.branch, enabled = 1",
+        params![owner, name, branch],
+    )
+    .map_err(|e| format!("保存仓库失败: {e}"))?;
+
+    load_skill_repos_manage_internal(false)
+}
+
+fn remove_skill_repo_internal(owner: &str, name: &str) -> CmdResult<SkillRepoManageView> {
+    let owner = owner.trim();
+    let name = name.trim();
+    if owner.is_empty() || name.is_empty() {
+        return Err("删除仓库失败：owner/name 不能为空。".to_string());
+    }
+
+    let db_path = ccswitch_db_file()?;
+    if !db_path.exists() {
+        return Ok(SkillRepoManageView { repos: Vec::new() });
+    }
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    if !ccswitch_db_has_skill_repos_table(&conn)? {
+        return Ok(SkillRepoManageView { repos: Vec::new() });
+    }
+    ccswitch_ensure_skill_repo_cache_tables(&conn)?;
+    conn.execute(
+        "DELETE FROM skill_repos WHERE lower(owner)=lower(?1) AND lower(name)=lower(?2)",
+        params![owner, name],
+    )
+    .map_err(|e| format!("删除仓库失败: {e}"))?;
+    ccswitch_remove_repo_cache(&conn, owner, name)?;
+
+    load_skill_repos_manage_internal(false)
+}
+
+fn build_skill_doc_url(owner: &str, repo: &str, branch: &str, doc_path: &str) -> String {
+    format!("https://github.com/{owner}/{repo}/blob/{branch}/{doc_path}")
+}
+
+fn fetch_repo_discovery_skills(repo: &DiscoverSkillRepoView) -> CmdResult<Vec<DiscoverSkillEntryView>> {
+    let payload = download_repo_tarball_bytes(&repo.owner, &repo.name, &repo.branch)?;
+    let decoder = GzDecoder::new(Cursor::new(payload));
+    let mut archive = Archive::new(decoder);
+
+    let mut seen_dirs: HashSet<String> = HashSet::new();
+    let mut skills: Vec<DiscoverSkillEntryView> = Vec::new();
+
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("解析仓库归档失败 {}/{}: {e}", repo.owner, repo.name))?;
+    for item in entries {
+        let mut entry = item.map_err(|e| format!("读取仓库条目失败 {}/{}: {e}", repo.owner, repo.name))?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| format!("读取仓库路径失败 {}/{}: {e}", repo.owner, repo.name))?;
+        let member = path_to_posix(path.as_ref());
+        if !member.ends_with("/SKILL.md") {
+            continue;
+        }
+        let parts: Vec<&str> = member.split('/').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let inner_parts = &parts[1..];
+        if inner_parts.last().copied() != Some("SKILL.md") {
+            continue;
+        }
+        let repo_directory = if inner_parts.len() > 1 {
+            inner_parts[..inner_parts.len() - 1].join("/")
+        } else {
+            String::new()
+        };
+        let dedupe_key = repo_directory.to_lowercase();
+        if !seen_dirs.insert(dedupe_key) {
+            continue;
+        }
+
+        let fallback = if repo_directory.is_empty() {
+            repo.name.clone()
+        } else {
+            Path::new(&repo_directory)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("skill")
+                .to_string()
+        };
+        let local_directory = sanitize_local_skill_directory(&fallback);
+
+        let mut bytes: Vec<u8> = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("读取 SKILL.md 失败 {}/{}: {e}", repo.owner, repo.name))?;
+        let manifest = String::from_utf8_lossy(&bytes);
+        let (name, description) = parse_skill_manifest_text(&manifest, &fallback);
+
+        let doc_path = if repo_directory.is_empty() {
+            "SKILL.md".to_string()
+        } else {
+            format!("{repo_directory}/SKILL.md")
+        };
+        let readme_url = build_skill_doc_url(&repo.owner, &repo.name, &repo.branch, &doc_path);
+
+        let mut id = normalize_skill_id(&format!(
+            "{}-{}-{}",
+            repo.owner,
+            repo.name,
+            if repo_directory.is_empty() {
+                "__root__".to_string()
+            } else {
+                repo_directory.clone()
+            }
+        ));
+        if id.is_empty() {
+            id = normalize_skill_id(&format!("{}-{}-skill", repo.owner, repo.name));
+        }
+        if id.is_empty() {
+            continue;
+        }
+
+        skills.push(DiscoverSkillEntryView {
+            id,
+            name,
+            description,
+            directory: local_directory,
+            repo_directory,
+            repo_owner: repo.owner.clone(),
+            repo_name: repo.name.clone(),
+            repo_branch: repo.branch.clone(),
+            readme_url,
+            installed: false,
+        });
+    }
+
+    skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(skills)
+}
+
+fn ccswitch_get_repo_discovery_skills(
+    conn: &Connection,
+    repo: &DiscoverSkillRepoView,
+    sync_remote: bool,
+    force_refresh: bool,
+) -> CmdResult<Vec<DiscoverSkillEntryView>> {
+    let cached_skills = ccswitch_load_repo_cached_skills(conn, repo)?;
+    let cached_meta = ccswitch_load_repo_cache_meta(conn, repo)?;
+    if !sync_remote {
+        return Ok(cached_skills);
+    }
+
+    let now_ts = Local::now().timestamp();
+    let should_skip_compare = !force_refresh
+        && cached_meta
+            .as_ref()
+            .map(|meta| {
+                meta.checked_at > 0
+                    && (now_ts - meta.checked_at) < SKILL_DISCOVERY_COMPARE_MIN_INTERVAL_SECS
+            })
+            .unwrap_or(false);
+    if should_skip_compare {
+        return Ok(cached_skills);
+    }
+
+    let head_sha = match fetch_repo_branch_head_sha(repo) {
+        Ok(sha) => Some(sha),
+        Err(err) => {
+            eprintln!(
+                "仓库 HEAD 比对失败 {}/{}@{}: {}",
+                repo.owner, repo.name, repo.branch, err
+            );
+            None
+        }
+    };
+
+    let should_fetch_tarball = if force_refresh {
+        true
+    } else {
+        match (head_sha.as_deref(), cached_meta.as_ref()) {
+            (Some(sha), Some(meta)) => {
+                meta.head_sha.as_deref() != Some(sha)
+                    || meta.skill_count != cached_skills.len()
+                    || cached_skills.is_empty()
+            }
+            (Some(_), None) => true,
+            (None, _) => cached_skills.is_empty(),
+        }
+    };
+
+    if !should_fetch_tarball {
+        ccswitch_touch_repo_cache_checked(conn, repo, head_sha.as_deref(), cached_skills.len())?;
+        return Ok(cached_skills);
+    }
+
+    match fetch_repo_discovery_skills(repo) {
+        Ok(fresh) => {
+            ccswitch_replace_repo_cache(conn, repo, head_sha.as_deref(), &fresh)?;
+            Ok(fresh)
+        }
+        Err(err) => {
+            eprintln!(
+                "仓库技能增量同步失败 {}/{}@{}: {}",
+                repo.owner, repo.name, repo.branch, err
+            );
+            if !cached_skills.is_empty() {
+                let _ = ccswitch_touch_repo_cache_checked(
+                    conn,
+                    repo,
+                    head_sha.as_deref(),
+                    cached_skills.len(),
+                );
+                Ok(cached_skills)
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+fn load_skills_discovery_internal(sync_remote: bool) -> CmdResult<SkillsDiscoveryView> {
+    ensure_ccswitch_ssot_seeded()?;
+    let installed_directories: HashSet<String> = load_skills_catalog_internal()
+        .map(|catalog| {
+            catalog
+                .skills
+                .into_iter()
+                .map(|skill| skill.directory.to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let db_path = ccswitch_db_file()?;
+    if !db_path.exists() {
+        return Ok(SkillsDiscoveryView {
+            total: 0,
+            repos: Vec::new(),
+            skills: Vec::new(),
+        });
+    }
+
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    ccswitch_ensure_skill_repo_cache_tables(&conn)?;
+
+    let repos = ccswitch_load_skill_repos(&conn)?;
+    let installed_readmes = if ccswitch_db_has_skills_table(&conn)? {
+        ccswitch_load_installed_readme_urls(&conn)?
+    } else {
+        HashSet::new()
+    };
+    let mut all_skills: Vec<DiscoverSkillEntryView> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for repo in repos.iter().filter(|repo| repo.enabled) {
+        match ccswitch_get_repo_discovery_skills(&conn, repo, sync_remote, false) {
+            Ok(skills) => {
+                for mut item in skills {
+                    item.installed = installed_readmes.contains(&item.readme_url.to_lowercase())
+                        || installed_directories.contains(&item.directory.to_lowercase());
+                    let key = format!(
+                        "{}|{}|{}",
+                        item.repo_owner.to_lowercase(),
+                        item.repo_name.to_lowercase(),
+                        item.repo_directory.to_lowercase()
+                    );
+                    if seen.insert(key) {
+                        all_skills.push(item);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "发现技能读取失败 {}/{}@{}: {}",
+                    repo.owner,
+                    repo.name,
+                    repo.branch,
+                    err
+                );
+            }
+        }
+    }
+
+    all_skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(SkillsDiscoveryView {
+        total: all_skills.len(),
+        repos,
+        skills: all_skills,
+    })
+}
+
+fn sync_skills_to_ccswitch_db(skills: &[SkillEntryView]) -> CmdResult<()> {
+    let db_path = ccswitch_db_file()?;
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    if !ccswitch_db_has_skills_table(&conn)? {
+        return Ok(());
+    }
+    for skill in skills {
+        ccswitch_upsert_skill_row(&conn, skill)?;
+    }
+    Ok(())
+}
+
+fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
+    ensure_ccswitch_ssot_seeded()?;
+
+    let mut merged: BTreeMap<String, SkillScanEntry> = BTreeMap::new();
+    scan_skill_root(&ccswitch_ssot_skills_dir()?, SkillScanSource::Ssot, &mut merged)?;
+    scan_skill_root(&codex_skills_dir()?, SkillScanSource::Codex, &mut merged)?;
+    scan_skill_root(&opencode_skills_dir()?, SkillScanSource::OpenCode, &mut merged)?;
+    scan_skill_root(
+        &opencode_legacy_skills_dir()?,
+        SkillScanSource::OpenCodeLegacy,
+        &mut merged,
+    )?;
+
     let mut skills: Vec<SkillEntryView> = merged
         .into_values()
-        .map(|entry| {
-            let targets = targets_map
-                .get(&entry.id)
-                .cloned()
-                .unwrap_or_else(SkillTargets::default);
+        .map(|mut entry| {
+            let opencode_present = entry.opencode_source || entry.opencode_legacy_source;
+            let has_source = entry.ssot_source || entry.codex_source || opencode_present;
             let source = skill_source_label(&entry);
+            entry.locations.sort();
+            entry.locations.dedup();
             SkillEntryView {
                 id: entry.id,
+                directory: entry.directory,
                 name: entry.name,
                 description: entry.description,
-                codex_enabled: targets.codex,
-                opencode_enabled: targets.opencode,
+                codex_enabled: entry.codex_source,
+                opencode_enabled: opencode_present,
+                codex_available: has_source,
+                opencode_available: has_source,
                 source,
                 locations: entry.locations,
             }
@@ -946,12 +2658,16 @@ fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
     let opencode_enabled_count = skills.iter().filter(|s| s.opencode_enabled).count();
     let total = skills.len();
 
-    Ok(SkillsCatalogView {
+    let catalog = SkillsCatalogView {
         total,
         codex_enabled_count,
         opencode_enabled_count,
         skills,
-    })
+    };
+
+    sync_skills_to_ccswitch_db(&catalog.skills)?;
+
+    Ok(catalog)
 }
 
 fn set_skill_targets_internal(
@@ -959,18 +2675,1009 @@ fn set_skill_targets_internal(
     codex: bool,
     opencode: bool,
 ) -> CmdResult<SkillsCatalogView> {
-    let normalized = normalize_skill_id(skill_id);
-    if normalized.is_empty() {
+    let key_raw = skill_id.trim();
+    if key_raw.is_empty() {
         return Err("skillId 不能为空。".to_string());
     }
-    let mut map = read_skill_targets_map()?;
-    if codex && opencode {
-        map.remove(&normalized);
+
+    let normalized = normalize_skill_id(key_raw);
+    let catalog = load_skills_catalog_internal()?;
+    let skill = catalog
+        .skills
+        .into_iter()
+        .find(|item| {
+            item.id.eq_ignore_ascii_case(key_raw)
+                || item.directory.eq_ignore_ascii_case(key_raw)
+                || (!normalized.is_empty() && item.id.eq_ignore_ascii_case(&normalized))
+        })
+        .ok_or_else(|| format!("未找到 Skill: {key_raw}"))?;
+
+    ensure_skill_in_ssot(&skill.directory)?;
+
+    if codex {
+        sync_skill_to_target_dir(&skill.directory, &codex_skills_dir()?)?;
     } else {
-        map.insert(normalized, SkillTargets { codex, opencode });
+        remove_skill_from_target_dir(&skill.directory, &codex_skills_dir()?)?;
     }
-    write_skill_targets_map(&map)?;
+
+    for root in opencode_skills_target_dirs()? {
+        if opencode {
+            sync_skill_to_target_dir(&skill.directory, &root)?;
+        } else {
+            remove_skill_from_target_dir(&skill.directory, &root)?;
+        }
+    }
+
     load_skills_catalog_internal()
+}
+
+fn delete_skill_internal(skill_id: &str) -> CmdResult<SkillsCatalogView> {
+    let key_raw = skill_id.trim();
+    if key_raw.is_empty() {
+        return Err("skillId 不能为空。".to_string());
+    }
+
+    let normalized = normalize_skill_id(key_raw);
+    let catalog = load_skills_catalog_internal()?;
+    let skill = catalog
+        .skills
+        .into_iter()
+        .find(|item| {
+            item.id.eq_ignore_ascii_case(key_raw)
+                || item.directory.eq_ignore_ascii_case(key_raw)
+                || (!normalized.is_empty() && item.id.eq_ignore_ascii_case(&normalized))
+        })
+        .ok_or_else(|| format!("未找到 Skill: {key_raw}"))?;
+
+    let directory = skill.directory.clone();
+
+    let _ = remove_skill_from_target_dir(&directory, &codex_skills_dir()?);
+    for root in opencode_skills_target_dirs()? {
+        let _ = remove_skill_from_target_dir(&directory, &root);
+    }
+
+    let ssot_dir = ccswitch_ssot_skills_dir()?.join(&directory);
+    let _ = remove_path_safe(&ssot_dir);
+    let legacy_dir = legacy_switcher_skills_dir()?.join(&directory);
+    let _ = remove_path_safe(&legacy_dir);
+
+    let db_path = ccswitch_db_file()?;
+    if db_path.exists() {
+        let conn = Connection::open(&db_path)
+            .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+        let _ = conn.busy_timeout(Duration::from_millis(1500));
+        if ccswitch_db_has_skills_table(&conn)? {
+            conn.execute(
+                "DELETE FROM skills WHERE lower(directory)=lower(?1)",
+                params![directory],
+            )
+            .map_err(|e| format!("删除 CC Switch skill 记录失败: {e}"))?;
+        }
+    }
+
+    load_skills_catalog_internal()
+}
+
+fn mcp_opencode_config_file() -> CmdResult<PathBuf> {
+    Ok(home_dir()?
+        .join(".config")
+        .join("opencode")
+        .join(OPENCODE_CONFIG_FILE_NAME))
+}
+
+fn mcp_read_opencode_config_root() -> CmdResult<Value> {
+    let path = mcp_opencode_config_file()?;
+    if !path.exists() {
+        return Ok(json!({ "$schema": OPENCODE_CONFIG_SCHEMA_URL }));
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|e| format!("读取 OpenCode 配置失败 ({}): {e}", path.display()))?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    if text.trim().is_empty() {
+        return Ok(json!({ "$schema": OPENCODE_CONFIG_SCHEMA_URL }));
+    }
+    serde_json::from_str::<Value>(text)
+        .map_err(|e| format!("解析 OpenCode 配置失败 ({}): {e}", path.display()))
+}
+
+fn mcp_write_opencode_config_root(root: &Value) -> CmdResult<()> {
+    let path = mcp_opencode_config_file()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 OpenCode 配置目录失败 ({}): {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(root)
+        .map_err(|e| format!("序列化 OpenCode 配置失败: {e}"))?;
+    fs::write(&path, format!("{text}\n"))
+        .map_err(|e| format!("写入 OpenCode 配置失败 ({}): {e}", path.display()))
+}
+
+fn mcp_parse_toml_document(text: &str) -> CmdResult<TomlEditDocument> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if text.trim().is_empty() {
+        return Ok(TomlEditDocument::new());
+    }
+    text.parse::<TomlEditDocument>()
+        .map_err(|e| format!("解析 Codex 配置失败: {e}"))
+}
+
+fn mcp_toml_value_to_json(value: &TomlEditValue) -> Value {
+    if let Some(v) = value.as_bool() {
+        return Value::Bool(v);
+    }
+    if let Some(v) = value.as_integer() {
+        return Value::Number(v.into());
+    }
+    if let Some(v) = value.as_float() {
+        return serde_json::Number::from_f64(v)
+            .map(Value::Number)
+            .unwrap_or(Value::Null);
+    }
+    if let Some(v) = value.as_str() {
+        return Value::String(v.to_string());
+    }
+    if let Some(v) = value.as_datetime() {
+        return Value::String(v.to_string());
+    }
+    if let Some(arr) = value.as_array() {
+        return Value::Array(arr.iter().map(mcp_toml_value_to_json).collect());
+    }
+    if let Some(tbl) = value.as_inline_table() {
+        let mut out = Map::new();
+        for (k, v) in tbl.iter() {
+            out.insert(k.to_string(), mcp_toml_value_to_json(v));
+        }
+        return Value::Object(out);
+    }
+    Value::String(value.to_string())
+}
+
+fn mcp_toml_table_to_json(table: &TomlEditTable) -> Map<String, Value> {
+    let mut out = Map::new();
+    for (k, item) in table.iter() {
+        if let Some(v) = mcp_toml_item_to_json(item) {
+            out.insert(k.to_string(), v);
+        }
+    }
+    out
+}
+
+fn mcp_toml_item_to_json(item: &TomlEditItem) -> Option<Value> {
+    match item {
+        TomlEditItem::None => None,
+        TomlEditItem::Value(v) => Some(mcp_toml_value_to_json(v)),
+        TomlEditItem::Table(t) => Some(Value::Object(mcp_toml_table_to_json(t))),
+        TomlEditItem::ArrayOfTables(arr) => Some(Value::Array(
+            arr.iter()
+                .map(|table| Value::Object(mcp_toml_table_to_json(table)))
+                .collect(),
+        )),
+    }
+}
+
+fn mcp_toml_item_to_object(item: &TomlEditItem) -> Option<Map<String, Value>> {
+    if let Some(table) = item.as_table() {
+        return Some(mcp_toml_table_to_json(table));
+    }
+    if let Some(value) = item.as_value() {
+        if let Some(inline) = value.as_inline_table() {
+            let mut out = Map::new();
+            for (k, v) in inline.iter() {
+                out.insert(k.to_string(), mcp_toml_value_to_json(v));
+            }
+            return Some(out);
+        }
+    }
+    None
+}
+
+fn mcp_collect_codex_servers_from_table(
+    table: &TomlEditTable,
+    out: &mut BTreeMap<String, Value>,
+    override_existing: bool,
+) {
+    for (server_id, item) in table.iter() {
+        let id = server_id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if !override_existing && out.contains_key(id) {
+            continue;
+        }
+        if let Some(obj) = mcp_toml_item_to_object(item) {
+            out.insert(id.to_string(), Value::Object(obj));
+        }
+    }
+}
+
+fn read_codex_mcp_servers() -> CmdResult<BTreeMap<String, Value>> {
+    let path = codex_home()?.join(CONFIG_FILE_NAME);
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let text =
+        fs::read_to_string(&path).map_err(|e| format!("读取 Codex 配置失败 ({}): {e}", path.display()))?;
+    let doc = mcp_parse_toml_document(&text)?;
+    let mut servers: BTreeMap<String, Value> = BTreeMap::new();
+
+    if let Some(table) = doc.get("mcp_servers").and_then(TomlEditItem::as_table) {
+        mcp_collect_codex_servers_from_table(table, &mut servers, true);
+    }
+
+    if let Some(mcp_table) = doc.get("mcp").and_then(TomlEditItem::as_table) {
+        if let Some(legacy_servers) = mcp_table.get("servers").and_then(TomlEditItem::as_table) {
+            mcp_collect_codex_servers_from_table(legacy_servers, &mut servers, false);
+        }
+    }
+
+    Ok(servers)
+}
+
+fn mcp_json_value_to_toml_value(value: &Value) -> CmdResult<TomlEditValue> {
+    match value {
+        Value::Null => Err("MCP 配置不支持 null。".to_string()),
+        Value::Bool(v) => Ok(TomlEditValue::from(*v)),
+        Value::Number(v) => {
+            if let Some(i) = v.as_i64() {
+                return Ok(TomlEditValue::from(i));
+            }
+            if let Some(u) = v.as_u64() {
+                if u <= i64::MAX as u64 {
+                    return Ok(TomlEditValue::from(u as i64));
+                }
+                return Ok(TomlEditValue::from(u as f64));
+            }
+            if let Some(f) = v.as_f64() {
+                return Ok(TomlEditValue::from(f));
+            }
+            Err("MCP 数字字段格式无效。".to_string())
+        }
+        Value::String(v) => Ok(TomlEditValue::from(v.as_str())),
+        Value::Array(values) => {
+            let mut arr = TomlEditArray::new();
+            for item in values {
+                arr.push(mcp_json_value_to_toml_value(item)?);
+            }
+            Ok(TomlEditValue::Array(arr))
+        }
+        Value::Object(values) => {
+            let mut table = TomlEditInlineTable::new();
+            for (k, v) in values {
+                table.insert(k, mcp_json_value_to_toml_value(v)?);
+            }
+            Ok(TomlEditValue::InlineTable(table))
+        }
+    }
+}
+
+fn mcp_json_value_to_toml_item(value: &Value) -> CmdResult<TomlEditItem> {
+    Ok(TomlEditItem::Value(mcp_json_value_to_toml_value(value)?))
+}
+
+fn mcp_json_object_to_server_table(obj: &Map<String, Value>) -> CmdResult<TomlEditTable> {
+    let mut table = TomlEditTable::new();
+    table.set_implicit(false);
+    for (k, v) in obj {
+        table.insert(k, mcp_json_value_to_toml_item(v)?);
+    }
+    Ok(table)
+}
+
+fn write_codex_mcp_servers(servers: &BTreeMap<String, Value>) -> CmdResult<()> {
+    let path = codex_home()?.join(CONFIG_FILE_NAME);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 Codex 配置目录失败 ({}): {e}", parent.display()))?;
+    }
+    let current_text = if path.exists() {
+        fs::read_to_string(&path)
+            .map_err(|e| format!("读取 Codex 配置失败 ({}): {e}", path.display()))?
+    } else {
+        String::new()
+    };
+    let mut doc = mcp_parse_toml_document(&current_text)?;
+
+    if let Some(mcp_item) = doc.get_mut("mcp") {
+        if let Some(mcp_table) = mcp_item.as_table_mut() {
+            mcp_table.remove("servers");
+            if mcp_table.is_empty() {
+                doc.as_table_mut().remove("mcp");
+            }
+        }
+    }
+
+    if servers.is_empty() {
+        doc.as_table_mut().remove("mcp_servers");
+    } else {
+        let mut mcp_servers_table = TomlEditTable::new();
+        mcp_servers_table.set_implicit(false);
+        for (id, spec) in servers {
+            let obj = spec
+                .as_object()
+                .ok_or_else(|| format!("MCP 服务器 `{id}` 配置必须是对象。"))?;
+            let server_table = mcp_json_object_to_server_table(obj)?;
+            mcp_servers_table.insert(id, TomlEditItem::Table(server_table));
+        }
+        doc["mcp_servers"] = TomlEditItem::Table(mcp_servers_table);
+    }
+
+    let mut output = doc.to_string();
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    fs::write(&path, output).map_err(|e| format!("写入 Codex 配置失败 ({}): {e}", path.display()))
+}
+
+fn read_opencode_mcp_servers() -> CmdResult<BTreeMap<String, Value>> {
+    let root = mcp_read_opencode_config_root()?;
+    let mut servers = BTreeMap::new();
+    if let Some(map) = root.get("mcp").and_then(Value::as_object) {
+        for (id, spec) in map {
+            let key = id.trim();
+            if key.is_empty() || !spec.is_object() {
+                continue;
+            }
+            servers.insert(key.to_string(), spec.clone());
+        }
+    }
+    Ok(servers)
+}
+
+fn write_opencode_mcp_servers(servers: &BTreeMap<String, Value>) -> CmdResult<()> {
+    let mut root = mcp_read_opencode_config_root()?;
+    if !root.is_object() {
+        root = Value::Object(Map::new());
+    }
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| "OpenCode 配置根对象格式无效。".to_string())?;
+
+    if !root_obj.contains_key("$schema") {
+        root_obj.insert(
+            "$schema".to_string(),
+            Value::String(OPENCODE_CONFIG_SCHEMA_URL.to_string()),
+        );
+    }
+
+    if servers.is_empty() {
+        root_obj.remove("mcp");
+    } else {
+        let mut mcp_obj = Map::new();
+        for (id, spec) in servers {
+            mcp_obj.insert(id.clone(), spec.clone());
+        }
+        root_obj.insert("mcp".to_string(), Value::Object(mcp_obj));
+    }
+
+    mcp_write_opencode_config_root(&root)
+}
+
+fn mcp_find_key_case_insensitive(map: &BTreeMap<String, Value>, needle: &str) -> Option<String> {
+    map.keys().find(|k| k.eq_ignore_ascii_case(needle)).cloned()
+}
+
+fn mcp_source_label(codex_enabled: bool, opencode_enabled: bool) -> String {
+    match (codex_enabled, opencode_enabled) {
+        (true, true) => "Codex+OpenCode".to_string(),
+        (true, false) => "Codex".to_string(),
+        (false, true) => "OpenCode".to_string(),
+        (false, false) => "-".to_string(),
+    }
+}
+
+fn mcp_summarize_args(args: &[Value], limit: usize) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for arg in args {
+        if let Some(text) = arg.as_str() {
+            out.push(text.to_string());
+        } else {
+            out.push(arg.to_string());
+        }
+        if out.len() >= limit {
+            break;
+        }
+    }
+    if args.len() > limit {
+        out.push("...".to_string());
+    }
+    out.join(" ")
+}
+
+fn mcp_normalize_http_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
+fn mcp_extract_url_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => mcp_normalize_http_url(text),
+        Value::Array(items) => {
+            for item in items {
+                if let Some(url) = mcp_extract_url_from_value(item) {
+                    return Some(url);
+                }
+            }
+            None
+        }
+        Value::Object(obj) => {
+            for key in ["url", "href"] {
+                if let Some(found) = obj.get(key).and_then(mcp_extract_url_from_value) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn mcp_extract_url_by_keys(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some((_, value)) = obj
+            .iter()
+            .find(|(entry_key, _)| entry_key.eq_ignore_ascii_case(key))
+        {
+            if let Some(url) = mcp_extract_url_from_value(value) {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+fn mcp_extract_endpoint_url(spec: &Value, kind: &str) -> Option<String> {
+    if !matches!(kind, "sse" | "http") {
+        return None;
+    }
+    let obj = spec.as_object()?;
+    mcp_extract_url_by_keys(obj, &["url"])
+}
+
+fn mcp_guess_doc_url_from_endpoint(endpoint_url: &str) -> Option<String> {
+    let parsed = tauri::Url::parse(endpoint_url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host == "mcp.context7.com" {
+        return Some("https://github.com/upstash/context7/blob/master/README.md".to_string());
+    }
+
+    let mut candidate = parsed.clone();
+    let raw_segments: Vec<&str> = parsed
+        .path_segments()
+        .map(|items| items.filter(|seg| !seg.is_empty()).collect())
+        .unwrap_or_else(Vec::new);
+    let mut segments: Vec<&str> = raw_segments.clone();
+
+    fn is_version_segment(seg: &str) -> bool {
+        let text = seg.trim().to_ascii_lowercase();
+        if text.len() < 2 || !text.starts_with('v') {
+            return false;
+        }
+        text[1..].chars().all(|ch| ch.is_ascii_digit())
+    }
+
+    fn is_endpoint_segment(seg: &str) -> bool {
+        matches!(
+            seg.trim().to_ascii_lowercase().as_str(),
+            "mcp"
+                | "sse"
+                | "event"
+                | "events"
+                | "event-stream"
+                | "stream"
+                | "rpc"
+                | "jsonrpc"
+                | "transport"
+                | "gateway"
+                | "api"
+                | "invoke"
+        )
+    }
+
+    let has_docs_segment = segments.iter().any(|seg| {
+        matches!(
+            seg.trim().to_ascii_lowercase().as_str(),
+            "docs" | "doc" | "documentation" | "readme" | "guide" | "manual" | "help"
+        )
+    });
+
+    if !has_docs_segment {
+        while let Some(last) = segments.last().copied() {
+            if is_endpoint_segment(last) || is_version_segment(last) {
+                segments.pop();
+            } else {
+                break;
+            }
+        }
+    }
+
+    if has_docs_segment && !segments.is_empty() {
+        candidate.set_path(&format!("/{}", segments.join("/")));
+    } else {
+        candidate.set_path("/");
+    }
+    candidate.set_query(None);
+    candidate.set_fragment(None);
+    Some(candidate.to_string())
+}
+
+fn mcp_normalize_known_doc_url(
+    server_id: &str,
+    doc_url: Option<String>,
+    endpoint_url: Option<&str>,
+) -> Option<String> {
+    let context7_readme = "https://github.com/upstash/context7/blob/master/README.md";
+    let is_context7_id = server_id.eq_ignore_ascii_case("context7");
+    let is_context7_endpoint = endpoint_url
+        .and_then(|raw| tauri::Url::parse(raw).ok())
+        .and_then(|url| url.host_str().map(|h| h.eq_ignore_ascii_case("mcp.context7.com")))
+        .unwrap_or(false);
+    let is_context7_doc = doc_url
+        .as_deref()
+        .map(|raw| raw.to_ascii_lowercase().contains("github.com/upstash/context7"))
+        .unwrap_or(false);
+
+    if is_context7_id || is_context7_endpoint || is_context7_doc {
+        return Some(context7_readme.to_string());
+    }
+    doc_url
+}
+
+fn mcp_extract_doc_url(spec: &Value, endpoint_url: Option<&str>) -> Option<String> {
+    let obj = spec.as_object()?;
+    let explicit = mcp_extract_url_by_keys(
+        obj,
+        &[
+            "doc_url",
+            "docUrl",
+            "docs_url",
+            "docsUrl",
+            "documentation_url",
+            "documentationUrl",
+            "docs",
+            "doc",
+            "documentation",
+            "readme",
+            "readme_url",
+            "readmeUrl",
+            "homepage",
+            "website",
+            "site",
+            "help",
+            "manual",
+        ],
+    );
+    if explicit.is_some() {
+        return explicit;
+    }
+    endpoint_url.and_then(mcp_guess_doc_url_from_endpoint)
+}
+
+fn mcp_describe_codex_spec(spec: &Value) -> (String, String) {
+    let Some(obj) = spec.as_object() else {
+        return ("unknown".to_string(), "无效配置".to_string());
+    };
+    let raw_type = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let kind = if raw_type.is_empty() {
+        if obj
+            .get("url")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
+            "sse".to_string()
+        } else {
+            "stdio".to_string()
+        }
+    } else {
+        raw_type
+    };
+
+    if matches!(kind.as_str(), "sse" | "http") {
+        let url = obj
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        if url.is_empty() {
+            return (kind, "远程 MCP（未配置 URL）".to_string());
+        }
+        return (kind, format!("远程 MCP · {url}"));
+    }
+
+    let command = obj
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let args = obj
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|arr| mcp_summarize_args(arr, 8))
+        .unwrap_or_default();
+    if command.is_empty() {
+        return (kind, "本地 MCP（未配置 command）".to_string());
+    }
+    if args.is_empty() {
+        return (kind, format!("本地 MCP · {command}"));
+    }
+    (kind, format!("本地 MCP · {command} {args}"))
+}
+
+fn convert_opencode_spec_to_codex(spec: &Value) -> Value {
+    let Some(obj) = spec.as_object() else {
+        return spec.clone();
+    };
+    let mut out = obj.clone();
+    let typ = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let is_remote = typ == "remote";
+    if is_remote {
+        out.insert("type".to_string(), Value::String("sse".to_string()));
+        out.remove("enabled");
+        out.remove("environment");
+        out.remove("command");
+        out.remove("args");
+        return Value::Object(out);
+    }
+
+    out.insert("type".to_string(), Value::String("stdio".to_string()));
+    if let Some(command_arr) = obj.get("command").and_then(Value::as_array) {
+        if let Some(first) = command_arr.first().and_then(Value::as_str) {
+            out.insert("command".to_string(), Value::String(first.to_string()));
+            if command_arr.len() > 1 {
+                out.insert("args".to_string(), Value::Array(command_arr[1..].to_vec()));
+            } else {
+                out.remove("args");
+            }
+        }
+    }
+    if let Some(env) = out.remove("environment") {
+        out.insert("env".to_string(), env);
+    }
+    out.remove("enabled");
+    Value::Object(out)
+}
+
+fn convert_codex_spec_to_opencode(spec: &Value) -> Value {
+    let Some(obj) = spec.as_object() else {
+        return spec.clone();
+    };
+    let mut out = obj.clone();
+    let typ = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let is_remote = typ == "sse"
+        || typ == "http"
+        || obj
+            .get("url")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+    if is_remote {
+        out.insert("type".to_string(), Value::String("remote".to_string()));
+        out.remove("command");
+        out.remove("args");
+        out.remove("env");
+        out.remove("environment");
+        out.insert("enabled".to_string(), Value::Bool(true));
+        return Value::Object(out);
+    }
+
+    out.insert("type".to_string(), Value::String("local".to_string()));
+    let command = obj
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let mut command_arr: Vec<Value> = Vec::new();
+    if !command.is_empty() {
+        command_arr.push(Value::String(command.to_string()));
+    }
+    if let Some(args) = obj.get("args").and_then(Value::as_array) {
+        for arg in args {
+            command_arr.push(arg.clone());
+        }
+    }
+    if !command_arr.is_empty() {
+        out.insert("command".to_string(), Value::Array(command_arr));
+    }
+    out.remove("args");
+    if let Some(env) = out.remove("env") {
+        out.insert("environment".to_string(), env);
+    }
+    out.insert("enabled".to_string(), Value::Bool(true));
+    Value::Object(out)
+}
+
+fn normalize_new_mcp_spec_to_codex(spec: &Value) -> CmdResult<Value> {
+    let Some(obj) = spec.as_object() else {
+        return Err("MCP 配置必须是对象。".to_string());
+    };
+    let typ = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+
+    let mut normalized = if typ == "local" || typ == "remote" || obj.get("environment").is_some()
+    {
+        convert_opencode_spec_to_codex(spec)
+    } else {
+        spec.clone()
+    };
+    let normalized_obj = normalized
+        .as_object_mut()
+        .ok_or_else(|| "MCP 配置必须是对象。".to_string())?;
+    let mut normalized_type = normalized_obj
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if normalized_type.is_empty() {
+        if normalized_obj
+            .get("url")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
+            normalized_type = "sse".to_string();
+        } else {
+            normalized_type = "stdio".to_string();
+        }
+        normalized_obj.insert("type".to_string(), Value::String(normalized_type.clone()));
+    }
+
+    match normalized_type.as_str() {
+        "stdio" => {
+            let command = normalized_obj
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            if command.is_empty() {
+                return Err("stdio 类型 MCP 缺少 command。".to_string());
+            }
+        }
+        "sse" | "http" => {
+            let url = normalized_obj
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            if url.is_empty() {
+                return Err("远程 MCP 缺少 url。".to_string());
+            }
+        }
+        _ => {
+            return Err(format!("不支持的 MCP 类型: {normalized_type}"));
+        }
+    }
+
+    Ok(Value::Object(normalized_obj.clone()))
+}
+
+fn merge_mcp_maps(
+    codex_map: &BTreeMap<String, Value>,
+    opencode_map: &BTreeMap<String, Value>,
+) -> Vec<UnifiedMcpEntry> {
+    let mut merged: BTreeMap<String, UnifiedMcpEntry> = BTreeMap::new();
+    for (id, spec) in codex_map {
+        let key = id.to_lowercase();
+        let entry = merged.entry(key).or_default();
+        if entry.id.is_empty() {
+            entry.id = id.clone();
+        }
+        entry.codex_spec = Some(spec.clone());
+    }
+    for (id, spec) in opencode_map {
+        let key = id.to_lowercase();
+        let entry = merged.entry(key).or_default();
+        if entry.id.is_empty() {
+            entry.id = id.clone();
+        }
+        entry.opencode_spec = Some(spec.clone());
+    }
+    merged.into_values().collect()
+}
+
+fn load_mcp_manage_internal() -> CmdResult<McpManageView> {
+    let codex_map = read_codex_mcp_servers()?;
+    let opencode_map = read_opencode_mcp_servers()?;
+    let merged = merge_mcp_maps(&codex_map, &opencode_map);
+    let mut servers: Vec<McpServerView> = Vec::new();
+
+    for entry in merged {
+        let codex_enabled = entry.codex_spec.is_some();
+        let opencode_enabled = entry.opencode_spec.is_some();
+        let codex_available = codex_enabled || opencode_enabled;
+        let opencode_available = codex_enabled || opencode_enabled;
+        let source = mcp_source_label(codex_enabled, opencode_enabled);
+        let normalized_spec = entry
+            .codex_spec
+            .clone()
+            .or_else(|| entry.opencode_spec.as_ref().map(convert_opencode_spec_to_codex));
+        let (kind, description, endpoint_url, doc_url) = if let Some(spec) = normalized_spec {
+            let (kind, description) = mcp_describe_codex_spec(&spec);
+            let endpoint_url = mcp_extract_endpoint_url(&spec, &kind);
+            let doc_url = mcp_extract_doc_url(&spec, endpoint_url.as_deref());
+            let doc_url = mcp_normalize_known_doc_url(&entry.id, doc_url, endpoint_url.as_deref());
+            (kind, description, endpoint_url, doc_url)
+        } else {
+            (
+                "unknown".to_string(),
+                "未提供配置".to_string(),
+                None,
+                None,
+            )
+        };
+
+        servers.push(McpServerView {
+            id: entry.id.clone(),
+            name: entry.id.clone(),
+            description,
+            doc_url,
+            endpoint_url,
+            source,
+            kind,
+            codex_enabled,
+            opencode_enabled,
+            codex_available,
+            opencode_available,
+        });
+    }
+
+    servers.sort_by(|a, b| a.id.to_lowercase().cmp(&b.id.to_lowercase()));
+    let codex_enabled_count = servers.iter().filter(|s| s.codex_enabled).count();
+    let opencode_enabled_count = servers.iter().filter(|s| s.opencode_enabled).count();
+    Ok(McpManageView {
+        total: servers.len(),
+        codex_enabled_count,
+        opencode_enabled_count,
+        servers,
+    })
+}
+
+fn set_mcp_targets_internal(
+    server_id: &str,
+    codex_enabled: bool,
+    opencode_enabled: bool,
+) -> CmdResult<McpManageView> {
+    let id = server_id.trim();
+    if id.is_empty() {
+        return Err("MCP 服务器 ID 不能为空。".to_string());
+    }
+
+    let mut codex_map = read_codex_mcp_servers()?;
+    let mut opencode_map = read_opencode_mcp_servers()?;
+
+    let codex_key = mcp_find_key_case_insensitive(&codex_map, id);
+    let opencode_key = mcp_find_key_case_insensitive(&opencode_map, id);
+
+    let codex_spec = codex_key
+        .as_ref()
+        .and_then(|key| codex_map.get(key))
+        .cloned();
+    let opencode_spec = opencode_key
+        .as_ref()
+        .and_then(|key| opencode_map.get(key))
+        .cloned();
+
+    if codex_spec.is_none() && opencode_spec.is_none() {
+        return Err(format!("未找到 MCP 服务器: {id}"));
+    }
+
+    if codex_enabled {
+        let next_spec = codex_spec
+            .clone()
+            .or_else(|| opencode_spec.as_ref().map(convert_opencode_spec_to_codex))
+            .ok_or_else(|| format!("MCP `{id}` 缺少可写入 Codex 的配置。"))?;
+        codex_map.insert(id.to_string(), next_spec);
+        if let Some(old_key) = codex_key {
+            if !old_key.eq_ignore_ascii_case(id) {
+                codex_map.remove(&old_key);
+            }
+        }
+    } else if let Some(old_key) = codex_key {
+        codex_map.remove(&old_key);
+    }
+
+    if opencode_enabled {
+        let next_spec = opencode_spec
+            .clone()
+            .or_else(|| codex_spec.as_ref().map(convert_codex_spec_to_opencode))
+            .ok_or_else(|| format!("MCP `{id}` 缺少可写入 OpenCode 的配置。"))?;
+        opencode_map.insert(id.to_string(), next_spec);
+        if let Some(old_key) = opencode_key {
+            if !old_key.eq_ignore_ascii_case(id) {
+                opencode_map.remove(&old_key);
+            }
+        }
+    } else if let Some(old_key) = opencode_key {
+        opencode_map.remove(&old_key);
+    }
+
+    write_codex_mcp_servers(&codex_map)?;
+    write_opencode_mcp_servers(&opencode_map)?;
+    load_mcp_manage_internal()
+}
+
+fn add_mcp_server_internal(
+    server_id: &str,
+    spec: &Value,
+    codex_enabled: bool,
+    opencode_enabled: bool,
+) -> CmdResult<McpManageView> {
+    let id = server_id.trim();
+    if id.is_empty() {
+        return Err("MCP 服务器 ID 不能为空。".to_string());
+    }
+    if !codex_enabled && !opencode_enabled {
+        return Err("请至少启用 Codex 或 OpenCode 之一。".to_string());
+    }
+
+    let codex_spec = normalize_new_mcp_spec_to_codex(spec)?;
+    let opencode_spec = convert_codex_spec_to_opencode(&codex_spec);
+
+    let mut codex_map = read_codex_mcp_servers()?;
+    let mut opencode_map = read_opencode_mcp_servers()?;
+
+    if codex_enabled {
+        codex_map.insert(id.to_string(), codex_spec.clone());
+    } else if let Some(key) = mcp_find_key_case_insensitive(&codex_map, id) {
+        codex_map.remove(&key);
+    }
+
+    if opencode_enabled {
+        opencode_map.insert(id.to_string(), opencode_spec);
+    } else if let Some(key) = mcp_find_key_case_insensitive(&opencode_map, id) {
+        opencode_map.remove(&key);
+    }
+
+    write_codex_mcp_servers(&codex_map)?;
+    write_opencode_mcp_servers(&opencode_map)?;
+    load_mcp_manage_internal()
+}
+
+fn remove_mcp_server_internal(server_id: &str) -> CmdResult<McpManageView> {
+    let id = server_id.trim();
+    if id.is_empty() {
+        return Err("MCP 服务器 ID 不能为空。".to_string());
+    }
+
+    let mut codex_map = read_codex_mcp_servers()?;
+    let mut opencode_map = read_opencode_mcp_servers()?;
+
+    if let Some(key) = mcp_find_key_case_insensitive(&codex_map, id) {
+        codex_map.remove(&key);
+    }
+    if let Some(key) = mcp_find_key_case_insensitive(&opencode_map, id) {
+        opencode_map.remove(&key);
+    }
+
+    write_codex_mcp_servers(&codex_map)?;
+    write_opencode_mcp_servers(&opencode_map)?;
+    load_mcp_manage_internal()
+}
+
+fn import_existing_mcp_internal() -> CmdResult<McpManageView> {
+    load_mcp_manage_internal()
 }
 
 fn parse_auto_switch_mode(mode: Option<&str>) -> AutoSwitchMode {
@@ -8070,12 +10777,99 @@ fn load_skills_catalog() -> CmdResult<SkillsCatalogView> {
 }
 
 #[tauri::command]
+async fn load_skills_discovery(sync_remote: Option<bool>) -> CmdResult<SkillsDiscoveryView> {
+    let sync = sync_remote.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || load_skills_discovery_internal(sync))
+        .await
+        .map_err(|e| format!("加载发现技能任务执行失败: {e}"))?
+}
+
+#[tauri::command]
+async fn load_skill_repos_manage(refresh_count: bool) -> CmdResult<SkillRepoManageView> {
+    tauri::async_runtime::spawn_blocking(move || load_skill_repos_manage_internal(refresh_count))
+        .await
+        .map_err(|e| format!("加载仓库管理任务执行失败: {e}"))?
+}
+
+#[tauri::command]
+fn add_skill_repo(repo_input: String, branch: Option<String>) -> CmdResult<SkillRepoManageView> {
+    add_skill_repo_internal(&repo_input, branch.as_deref())
+}
+
+#[tauri::command]
+fn remove_skill_repo(owner: String, name: String) -> CmdResult<SkillRepoManageView> {
+    remove_skill_repo_internal(&owner, &name)
+}
+
+#[tauri::command]
+async fn install_discovery_skill(
+    repo_owner: String,
+    repo_name: String,
+    repo_branch: String,
+    repo_directory: String,
+    local_directory: String,
+    readme_url: String,
+    name: String,
+    description: String,
+) -> CmdResult<SkillsCatalogView> {
+    tauri::async_runtime::spawn_blocking(move || {
+        install_discovery_skill_internal(
+            &repo_owner,
+            &repo_name,
+            &repo_branch,
+            &repo_directory,
+            &local_directory,
+            &readme_url,
+            &name,
+            &description,
+        )
+    })
+    .await
+    .map_err(|e| format!("安装发现技能任务执行失败: {e}"))?
+}
+
+#[tauri::command]
 fn set_skill_targets(
     skill_id: String,
     codex: bool,
     opencode: bool,
 ) -> CmdResult<SkillsCatalogView> {
     set_skill_targets_internal(&skill_id, codex, opencode)
+}
+
+#[tauri::command]
+fn delete_skill(skill_id: String) -> CmdResult<SkillsCatalogView> {
+    delete_skill_internal(&skill_id)
+}
+
+#[tauri::command]
+fn load_mcp_manage() -> CmdResult<McpManageView> {
+    load_mcp_manage_internal()
+}
+
+#[tauri::command]
+fn import_existing_mcp() -> CmdResult<McpManageView> {
+    import_existing_mcp_internal()
+}
+
+#[tauri::command]
+fn set_mcp_targets(server_id: String, codex: bool, opencode: bool) -> CmdResult<McpManageView> {
+    set_mcp_targets_internal(&server_id, codex, opencode)
+}
+
+#[tauri::command]
+fn add_mcp_server(
+    server_id: String,
+    spec: Value,
+    codex: bool,
+    opencode: bool,
+) -> CmdResult<McpManageView> {
+    add_mcp_server_internal(&server_id, &spec, codex, opencode)
+}
+
+#[tauri::command]
+fn remove_mcp_server(server_id: String) -> CmdResult<McpManageView> {
+    remove_mcp_server_internal(&server_id)
 }
 
 #[tauri::command]
@@ -8107,6 +10901,21 @@ fn format_reset_time(ts: Option<i64>) -> String {
     fmt_reset(ts)
 }
 
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> CmdResult<bool> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("URL 不能为空。".to_string());
+    }
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        return Err("仅支持 http/https 链接。".to_string());
+    }
+    app.opener()
+        .open_url(trimmed.to_string(), None::<String>)
+        .map_err(|err| format!("打开链接失败: {err}"))?;
+    Ok(true)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -8136,11 +10945,23 @@ pub fn run() {
             get_codex_extension_info,
             is_codex_hook_installed,
             load_skills_catalog,
+            load_skills_discovery,
+            load_skill_repos_manage,
+            add_skill_repo,
+            remove_skill_repo,
+            install_discovery_skill,
             set_skill_targets,
+            delete_skill,
+            load_mcp_manage,
+            import_existing_mcp,
+            set_mcp_targets,
+            add_mcp_server,
+            remove_mcp_server,
             run_post_switch_action,
             export_data_backup,
             import_data_backup_base64,
-            format_reset_time
+            format_reset_time,
+            open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

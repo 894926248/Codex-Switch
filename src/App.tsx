@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import {
   DndContext,
   PointerSensor,
@@ -19,6 +19,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { ArrowLeft, Book, ChevronDown, Download, ExternalLink, FileArchive, Plus, RefreshCw, Search, Server, Settings, Trash2, Wrench } from "lucide-react";
 import "./App.css";
 import openaiLogo from "./assets/openai.svg";
 import opencodeLogo from "./assets/opencode.svg";
@@ -116,9 +117,91 @@ interface BackupImportResult {
   dashboard: DashboardData;
 }
 
+interface SkillEntryView {
+  id: string;
+  directory: string;
+  name: string;
+  description: string;
+  codexEnabled: boolean;
+  opencodeEnabled: boolean;
+  codexAvailable: boolean;
+  opencodeAvailable: boolean;
+  source: string;
+  locations: string[];
+}
+
+interface SkillsCatalogView {
+  total: number;
+  codexEnabledCount: number;
+  opencodeEnabledCount: number;
+  skills: SkillEntryView[];
+}
+
+interface DiscoverSkillRepoView {
+  owner: string;
+  name: string;
+  branch: string;
+  enabled: boolean;
+}
+
+interface DiscoverSkillEntryView {
+  id: string;
+  name: string;
+  description: string;
+  directory: string;
+  repoDirectory: string;
+  repoOwner: string;
+  repoName: string;
+  repoBranch: string;
+  readmeUrl: string;
+  installed: boolean;
+}
+
+interface SkillsDiscoveryView {
+  total: number;
+  repos: DiscoverSkillRepoView[];
+  skills: DiscoverSkillEntryView[];
+}
+
+interface SkillRepoManageItemView {
+  owner: string;
+  name: string;
+  branch: string;
+  enabled: boolean;
+  skillCount?: number | null;
+  repoUrl: string;
+}
+
+interface SkillRepoManageView {
+  repos: SkillRepoManageItemView[];
+}
+
+interface McpServerView {
+  id: string;
+  name: string;
+  description: string;
+  docUrl?: string | null;
+  endpointUrl?: string | null;
+  source: string;
+  kind: string;
+  codexEnabled: boolean;
+  opencodeEnabled: boolean;
+  codexAvailable: boolean;
+  opencodeAvailable: boolean;
+}
+
+interface McpManageView {
+  total: number;
+  codexEnabledCount: number;
+  opencodeEnabledCount: number;
+  servers: McpServerView[];
+}
+
 type PostSwitchStrategy = "hook" | "restart_extension_host";
 type AppMode = "gpt" | "opencode";
 type ActiveProfileByMode = Record<AppMode, string | null>;
+type SkillTarget = "codex" | "opencode";
+type ToolView = "dashboard" | "skills" | "skillsDiscovery" | "skillsRepos" | "prompts" | "mcp";
 
 function formatCurrentErrorWithProfile(data: Pick<DashboardData, "activeProfile" | "profiles"> | null, raw?: string | null): string | null {
   if (!raw) {
@@ -650,6 +733,75 @@ function SortableProfileCard({
   );
 }
 
+function McpIcon({ size = 16, className = "" }: { size?: number; className?: string }) {
+  return (
+    <svg
+      fill="currentColor"
+      fillRule="evenodd"
+      height={size}
+      width={size}
+      className={className}
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden
+    >
+      <path d="M15.688 2.343a2.588 2.588 0 00-3.61 0l-9.626 9.44a.863.863 0 01-1.203 0 .823.823 0 010-1.18l9.626-9.44a4.313 4.313 0 016.016 0 4.116 4.116 0 011.204 3.54 4.3 4.3 0 013.609 1.18l.05.05a4.115 4.115 0 010 5.9l-8.706 8.537a.274.274 0 000 .393l1.788 1.754a.823.823 0 010 1.18.863.863 0 01-1.203 0l-1.788-1.753a1.92 1.92 0 010-2.754l8.706-8.538a2.47 2.47 0 000-3.54l-.05-.049a2.588 2.588 0 00-3.607-.003l-7.172 7.034-.002.002-.098.097a.863.863 0 01-1.204 0 .823.823 0 010-1.18l7.273-7.133a2.47 2.47 0 00-.003-3.537z" />
+      <path d="M14.485 4.703a.823.823 0 000-1.18.863.863 0 00-1.204 0l-7.119 6.982a4.115 4.115 0 000 5.9 4.314 4.314 0 006.016 0l7.12-6.982a.823.823 0 000-1.18.863.863 0 00-1.204 0l-7.119 6.982a2.588 2.588 0 01-3.61 0 2.47 2.47 0 010-3.54l7.12-6.982z" />
+    </svg>
+  );
+}
+
+interface SkillTargetSwitchProps {
+  label: string;
+  icon: string;
+  checked: boolean;
+  busy: boolean;
+  onClick: () => void;
+}
+
+function SkillTargetSwitch({ label, icon, checked, busy, onClick }: SkillTargetSwitchProps) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      className={`skill-target-switch ${checked ? "on" : "off"}`}
+      onClick={onClick}
+      disabled={busy}
+    >
+      <span className="skill-target-label">
+        <img src={icon} alt="" aria-hidden className="skill-target-icon" />
+        <span>{label}</span>
+      </span>
+      <span className={`skill-target-track ${checked ? "on" : "off"}`}>
+        <span className="skill-target-thumb" />
+      </span>
+    </button>
+  );
+}
+
+function recomputeSkillsCatalog(catalog: SkillsCatalogView): SkillsCatalogView {
+  const codexEnabledCount = catalog.skills.filter((item) => item.codexEnabled).length;
+  const opencodeEnabledCount = catalog.skills.filter((item) => item.opencodeEnabled).length;
+  return {
+    ...catalog,
+    total: catalog.skills.length,
+    codexEnabledCount,
+    opencodeEnabledCount,
+  };
+}
+
+function recomputeMcpManage(view: McpManageView): McpManageView {
+  const codexEnabledCount = view.servers.filter((item) => item.codexEnabled).length;
+  const opencodeEnabledCount = view.servers.filter((item) => item.opencodeEnabled).length;
+  return {
+    ...view,
+    total: view.servers.length,
+    codexEnabledCount,
+    opencodeEnabledCount,
+  };
+}
+
 function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [displayProfiles, setDisplayProfiles] = useState<ProfileView[]>([]);
@@ -681,6 +833,41 @@ function App() {
   const [activeProfileByMode, setActiveProfileByMode] = useState<ActiveProfileByMode>(() =>
     readActiveProfileByModeStorage(),
   );
+  const [activeToolView, setActiveToolView] = useState<ToolView>("dashboard");
+  const [skillsCatalog, setSkillsCatalog] = useState<SkillsCatalogView | null>(null);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsRefreshing, setSkillsRefreshing] = useState(false);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [skillsBusyIds, setSkillsBusyIds] = useState<Record<string, boolean>>({});
+  const [skillsDiscovery, setSkillsDiscovery] = useState<SkillsDiscoveryView | null>(null);
+  const [skillsDiscoveryLoading, setSkillsDiscoveryLoading] = useState(false);
+  const [skillsDiscoveryRefreshing, setSkillsDiscoveryRefreshing] = useState(false);
+  const [skillsDiscoveryError, setSkillsDiscoveryError] = useState<string | null>(null);
+  const [skillsDiscoveryKeyword, setSkillsDiscoveryKeyword] = useState("");
+  const [skillsDiscoveryInstallFilter, setSkillsDiscoveryInstallFilter] = useState<"all" | "installed" | "notInstalled">("all");
+  const [skillsDiscoveryInstallingIds, setSkillsDiscoveryInstallingIds] = useState<Record<string, boolean>>({});
+  const [skillReposManage, setSkillReposManage] = useState<SkillRepoManageView | null>(null);
+  const [skillReposManageLoading, setSkillReposManageLoading] = useState(false);
+  const [skillReposManageRefreshing, setSkillReposManageRefreshing] = useState(false);
+  const [skillReposManageError, setSkillReposManageError] = useState<string | null>(null);
+  const [skillRepoInput, setSkillRepoInput] = useState("");
+  const [skillRepoBranch, setSkillRepoBranch] = useState("main");
+  const [skillRepoActionBusyKeys, setSkillRepoActionBusyKeys] = useState<Record<string, boolean>>({});
+  const [mcpManage, setMcpManage] = useState<McpManageView | null>(null);
+  const [mcpManageLoading, setMcpManageLoading] = useState(false);
+  const [mcpManageRefreshing, setMcpManageRefreshing] = useState(false);
+  const [mcpManageError, setMcpManageError] = useState<string | null>(null);
+  const [mcpBusyIds, setMcpBusyIds] = useState<Record<string, boolean>>({});
+  const [mcpAddOpen, setMcpAddOpen] = useState(false);
+  const [mcpFormId, setMcpFormId] = useState("");
+  const [mcpFormType, setMcpFormType] = useState<"stdio" | "sse" | "http">("stdio");
+  const [mcpFormCommand, setMcpFormCommand] = useState("npx");
+  const [mcpFormArgs, setMcpFormArgs] = useState("");
+  const [mcpFormUrl, setMcpFormUrl] = useState("");
+  const [mcpFormEnv, setMcpFormEnv] = useState("{}");
+  const [mcpFormCodexEnabled, setMcpFormCodexEnabled] = useState(true);
+  const [mcpFormOpencodeEnabled, setMcpFormOpencodeEnabled] = useState(true);
+  const [mcpFormError, setMcpFormError] = useState<string | null>(null);
 
   const autoTimerRef = useRef<number | null>(null);
   const autoRunningRef = useRef(false);
@@ -711,6 +898,631 @@ function App() {
     setActiveAppMode(mode);
     setStatusText(`已切换到 ${mode === "gpt" ? "GPT" : "OpenCode"} 模式`);
   }, []);
+
+  const loadSkillsCatalog = useCallback(async (showLoading: boolean) => {
+    if (showLoading) {
+      setSkillsLoading(true);
+    } else {
+      setSkillsRefreshing(true);
+    }
+    try {
+      const data = await invoke<SkillsCatalogView>("load_skills_catalog");
+      setSkillsCatalog(recomputeSkillsCatalog(data));
+      setSkillsError(null);
+    } catch (err) {
+      setSkillsError(`读取 Skills 失败: ${String(err)}`);
+    } finally {
+      setSkillsLoading(false);
+      setSkillsRefreshing(false);
+    }
+  }, []);
+
+  const loadSkillsDiscovery = useCallback(async (showLoading: boolean, syncRemote: boolean) => {
+    if (showLoading) {
+      setSkillsDiscoveryLoading(true);
+    } else {
+      setSkillsDiscoveryRefreshing(true);
+    }
+    try {
+      const data = await invoke<SkillsDiscoveryView>("load_skills_discovery", { syncRemote });
+      setSkillsDiscovery(data);
+      setSkillsDiscoveryError(null);
+    } catch (err) {
+      setSkillsDiscoveryError(`读取发现技能失败: ${String(err)}`);
+    } finally {
+      setSkillsDiscoveryLoading(false);
+      setSkillsDiscoveryRefreshing(false);
+    }
+  }, []);
+
+  const loadSkillReposManage = useCallback(async (showLoading: boolean, refreshCount: boolean) => {
+    if (showLoading) {
+      setSkillReposManageLoading(true);
+    } else {
+      setSkillReposManageRefreshing(true);
+    }
+    try {
+      const data = await invoke<SkillRepoManageView>("load_skill_repos_manage", { refreshCount });
+      setSkillReposManage(data);
+      setSkillReposManageError(null);
+    } catch (err) {
+      setSkillReposManageError(`读取仓库管理失败: ${String(err)}`);
+    } finally {
+      setSkillReposManageLoading(false);
+      setSkillReposManageRefreshing(false);
+    }
+  }, []);
+
+  const loadMcpManage = useCallback(async (showLoading: boolean) => {
+    if (showLoading) {
+      setMcpManageLoading(true);
+    } else {
+      setMcpManageRefreshing(true);
+    }
+    try {
+      const data = await invoke<McpManageView>("load_mcp_manage");
+      setMcpManage(recomputeMcpManage(data));
+      setMcpManageError(null);
+    } catch (err) {
+      setMcpManageError(`读取 MCP 失败: ${String(err)}`);
+    } finally {
+      setMcpManageLoading(false);
+      setMcpManageRefreshing(false);
+    }
+  }, []);
+
+  const onImportExistingMcp = useCallback(async () => {
+    setMcpManageRefreshing(true);
+    try {
+      const data = await invoke<McpManageView>("import_existing_mcp");
+      setMcpManage(recomputeMcpManage(data));
+      setMcpManageError(null);
+      setStatusText(`已导入已有 MCP 配置（${data.total} 个）`);
+    } catch (err) {
+      setMcpManageError(`导入 MCP 失败: ${String(err)}`);
+    } finally {
+      setMcpManageRefreshing(false);
+    }
+  }, []);
+
+  const resetMcpAddForm = useCallback(() => {
+    setMcpFormId("");
+    setMcpFormType("stdio");
+    setMcpFormCommand("npx");
+    setMcpFormArgs("");
+    setMcpFormUrl("");
+    setMcpFormEnv("{}");
+    setMcpFormCodexEnabled(true);
+    setMcpFormOpencodeEnabled(true);
+    setMcpFormError(null);
+  }, []);
+
+  const parseMcpArgsInput = useCallback((raw: string): string[] => {
+    const text = raw.trim();
+    if (!text) {
+      return [];
+    }
+    if (text.startsWith("[") && text.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+          return parsed.map((item) => String(item)).map((item) => item.trim()).filter(Boolean);
+        }
+      } catch {
+        // fall back to whitespace split
+      }
+    }
+    return text
+      .split(/\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }, []);
+
+  const onSubmitMcpAdd = useCallback(async () => {
+    const id = mcpFormId.trim();
+    if (!id) {
+      setMcpFormError("MCP ID 不能为空。");
+      return;
+    }
+    if (!mcpFormCodexEnabled && !mcpFormOpencodeEnabled) {
+      setMcpFormError("至少启用 Codex 或 OpenCode 其中之一。");
+      return;
+    }
+
+    const spec: Record<string, unknown> = { type: mcpFormType };
+    if (mcpFormType === "stdio") {
+      const command = mcpFormCommand.trim();
+      if (!command) {
+        setMcpFormError("stdio 类型 MCP 需要填写 command。");
+        return;
+      }
+      spec.command = command;
+      const args = parseMcpArgsInput(mcpFormArgs);
+      if (args.length > 0) {
+        spec.args = args;
+      }
+      const envText = mcpFormEnv.trim();
+      if (envText && envText !== "{}") {
+        try {
+          const parsedEnv = JSON.parse(envText);
+          if (!parsedEnv || typeof parsedEnv !== "object" || Array.isArray(parsedEnv)) {
+            setMcpFormError("env 必须是 JSON 对象。");
+            return;
+          }
+          spec.env = parsedEnv as Record<string, unknown>;
+        } catch {
+          setMcpFormError("env JSON 格式无效。");
+          return;
+        }
+      }
+    } else {
+      const url = mcpFormUrl.trim();
+      if (!url) {
+        setMcpFormError("远程 MCP 需要填写 URL。");
+        return;
+      }
+      spec.url = url;
+    }
+
+    const busyKey = "__add__";
+    setMcpBusyIds((prev) => ({ ...prev, [busyKey]: true }));
+    try {
+      const data = await invoke<McpManageView>("add_mcp_server", {
+        serverId: id,
+        spec,
+        codex: mcpFormCodexEnabled,
+        opencode: mcpFormOpencodeEnabled,
+      });
+      setMcpManage(recomputeMcpManage(data));
+      setMcpManageError(null);
+      setMcpAddOpen(false);
+      resetMcpAddForm();
+      setStatusText(`已添加 MCP: ${id}`);
+    } catch (err) {
+      setMcpFormError(`添加 MCP 失败: ${String(err)}`);
+    } finally {
+      setMcpBusyIds((prev) => {
+        const next = { ...prev };
+        delete next[busyKey];
+        return next;
+      });
+    }
+  }, [
+    mcpFormId,
+    mcpFormType,
+    mcpFormCommand,
+    mcpFormArgs,
+    mcpFormUrl,
+    mcpFormEnv,
+    mcpFormCodexEnabled,
+    mcpFormOpencodeEnabled,
+    parseMcpArgsInput,
+    resetMcpAddForm,
+  ]);
+
+  const onToggleMcpTarget = useCallback(
+    async (server: McpServerView, target: SkillTarget) => {
+      const nextCodex = target === "codex" ? !server.codexEnabled : server.codexEnabled;
+      const nextOpenCode = target === "opencode" ? !server.opencodeEnabled : server.opencodeEnabled;
+      setMcpBusyIds((prev) => ({ ...prev, [server.id]: true }));
+      setMcpManage((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        const optimistic = {
+          ...prev,
+          servers: prev.servers.map((item) =>
+            item.id === server.id
+              ? {
+                  ...item,
+                  codexEnabled: nextCodex,
+                  opencodeEnabled: nextOpenCode,
+                }
+              : item,
+          ),
+        };
+        return recomputeMcpManage(optimistic);
+      });
+      try {
+        const data = await invoke<McpManageView>("set_mcp_targets", {
+          serverId: server.id,
+          codex: nextCodex,
+          opencode: nextOpenCode,
+        });
+        setMcpManage(recomputeMcpManage(data));
+        setMcpManageError(null);
+      } catch (err) {
+        setMcpManageError(`更新 MCP 开关失败: ${String(err)}`);
+        await loadMcpManage(false);
+      } finally {
+        setMcpBusyIds((prev) => {
+          const next = { ...prev };
+          delete next[server.id];
+          return next;
+        });
+      }
+    },
+    [loadMcpManage],
+  );
+
+  const onRemoveMcpServer = useCallback(async (server: McpServerView) => {
+    const approved = await confirm(
+      `确定删除 MCP 服务器 "${server.name || server.id}" 吗？\n将从 Codex / OpenCode 配置中移除。`,
+      {
+        title: "删除 MCP 服务器",
+        kind: "warning",
+        okLabel: "删除",
+        cancelLabel: "取消",
+      },
+    );
+    if (!approved) {
+      return;
+    }
+    setMcpBusyIds((prev) => ({ ...prev, [server.id]: true }));
+    try {
+      const data = await invoke<McpManageView>("remove_mcp_server", { serverId: server.id });
+      setMcpManage(recomputeMcpManage(data));
+      setMcpManageError(null);
+      setStatusText(`已删除 MCP: ${server.name || server.id}`);
+    } catch (err) {
+      setMcpManageError(`删除 MCP 失败: ${String(err)}`);
+    } finally {
+      setMcpBusyIds((prev) => {
+        const next = { ...prev };
+        delete next[server.id];
+        return next;
+      });
+    }
+  }, []);
+
+  const onOpenMcpDoc = useCallback((server: McpServerView) => {
+    const targetUrl = (server.docUrl || "").trim();
+    if (!targetUrl) {
+      setStatusText(`MCP ${server.name || server.id} 未配置可访问文档链接。`);
+      return;
+    }
+    void (async () => {
+      try {
+        await invoke<boolean>("open_external_url", { url: targetUrl });
+        setStatusText(`已打开 MCP 文档: ${server.name || server.id}`);
+      } catch (err) {
+        setStatusText(`打开 MCP 文档失败: ${String(err)}`);
+      }
+    })();
+  }, []);
+
+  const onSkillsInstallFromZip = useCallback(async () => {
+    try {
+      const selected = await open({
+        title: "选择 Skills ZIP 包",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "ZIP", extensions: ["zip"] }],
+      });
+      if (!selected || Array.isArray(selected)) {
+        return;
+      }
+      setStatusText(`已选择 ZIP: ${selected}（当前版本暂未接入一键安装）`);
+    } catch (err) {
+      setStatusText(`读取 ZIP 失败: ${String(err)}`);
+    }
+  }, []);
+
+  const onSkillsImportExisting = useCallback(async () => {
+    await loadSkillsCatalog(false);
+    setStatusText("已重新扫描本地 Skills。");
+  }, [loadSkillsCatalog]);
+
+  const onSkillsDiscover = useCallback(() => {
+    setActiveToolView("skillsDiscovery");
+  }, []);
+
+  const onOpenSkillReposManage = useCallback(() => {
+    setActiveToolView("skillsRepos");
+  }, []);
+
+  const onOpenDiscoverSkillReadme = useCallback((skill: DiscoverSkillEntryView) => {
+    void (async () => {
+      try {
+        await invoke<boolean>("open_external_url", { url: skill.readmeUrl });
+        setStatusText(`已打开技能: ${skill.name}`);
+      } catch (err) {
+        setStatusText(`打开技能详情失败: ${String(err)}`);
+      }
+    })();
+  }, []);
+
+  const onInstallDiscoverySkill = useCallback(
+    async (skill: DiscoverSkillEntryView) => {
+      if (skill.installed) {
+        return;
+      }
+      setSkillsDiscoveryInstallingIds((prev) => ({ ...prev, [skill.id]: true }));
+      try {
+        await invoke<SkillsCatalogView>("install_discovery_skill", {
+          repoOwner: skill.repoOwner,
+          repoName: skill.repoName,
+          repoBranch: skill.repoBranch,
+          repoDirectory: skill.repoDirectory,
+          localDirectory: skill.directory,
+          readmeUrl: skill.readmeUrl,
+          name: skill.name,
+          description: skill.description,
+        });
+        setSkillsDiscovery((prev) =>
+          prev
+            ? {
+                ...prev,
+                skills: prev.skills.map((item) => (item.id === skill.id ? { ...item, installed: true } : item)),
+              }
+            : prev,
+        );
+        setStatusText(`已安装技能: ${skill.name}`);
+        void loadSkillsCatalog(false);
+      } catch (err) {
+        setStatusText(`安装技能失败: ${String(err)}`);
+      } finally {
+        setSkillsDiscoveryInstallingIds((prev) => {
+          const next = { ...prev };
+          delete next[skill.id];
+          return next;
+        });
+      }
+    },
+    [loadSkillsCatalog],
+  );
+
+  const onAddSkillRepo = useCallback(async () => {
+    const repoInput = skillRepoInput.trim();
+    if (!repoInput) {
+      setSkillReposManageError("仓库 URL 不能为空。");
+      return;
+    }
+    const busyKey = "__add__";
+    setSkillRepoActionBusyKeys((prev) => ({ ...prev, [busyKey]: true }));
+    try {
+      const data = await invoke<SkillRepoManageView>("add_skill_repo", {
+        repoInput,
+        branch: skillRepoBranch.trim() || "main",
+      });
+      setSkillReposManage(data);
+      setSkillReposManageError(null);
+      setSkillRepoInput("");
+      setStatusText(`已添加仓库: ${repoInput}`);
+      void loadSkillReposManage(false, true);
+      void loadSkillsDiscovery(false, true);
+    } catch (err) {
+      setSkillReposManageError(`添加仓库失败: ${String(err)}`);
+    } finally {
+      setSkillRepoActionBusyKeys((prev) => {
+        const next = { ...prev };
+        delete next[busyKey];
+        return next;
+      });
+    }
+  }, [skillRepoInput, skillRepoBranch, loadSkillReposManage, loadSkillsDiscovery]);
+
+  const onRemoveSkillRepo = useCallback(
+    async (repo: SkillRepoManageItemView) => {
+      const key = `${repo.owner}/${repo.name}`;
+      if (!window.confirm(`确定删除仓库 ${key} 吗？`)) {
+        return;
+      }
+      setSkillRepoActionBusyKeys((prev) => ({ ...prev, [key]: true }));
+      try {
+        const data = await invoke<SkillRepoManageView>("remove_skill_repo", { owner: repo.owner, name: repo.name });
+        setSkillReposManage(data);
+        setSkillReposManageError(null);
+        setStatusText(`已删除仓库: ${key}`);
+        void loadSkillsDiscovery(false, false);
+      } catch (err) {
+        setSkillReposManageError(`删除仓库失败: ${String(err)}`);
+      } finally {
+        setSkillRepoActionBusyKeys((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      }
+    },
+    [loadSkillsDiscovery],
+  );
+
+  const onOpenRepoHome = useCallback((repo: SkillRepoManageItemView) => {
+    void (async () => {
+      try {
+        await invoke<boolean>("open_external_url", { url: repo.repoUrl });
+        setStatusText(`已打开仓库: ${repo.owner}/${repo.name}`);
+      } catch (err) {
+        setStatusText(`打开仓库失败: ${String(err)}`);
+      }
+    })();
+  }, []);
+
+  const onToggleSkillTarget = useCallback(
+    async (skill: SkillEntryView, target: SkillTarget) => {
+      const nextCodex = target === "codex" ? !skill.codexEnabled : skill.codexEnabled;
+      const nextOpenCode = target === "opencode" ? !skill.opencodeEnabled : skill.opencodeEnabled;
+      setSkillsBusyIds((prev) => ({ ...prev, [skill.id]: true }));
+      setSkillsCatalog((prev) => {
+        if (!prev) {
+          return prev;
+        }
+        const optimistic = {
+          ...prev,
+          skills: prev.skills.map((item) =>
+            item.id === skill.id
+              ? {
+                  ...item,
+                  codexEnabled: nextCodex,
+                  opencodeEnabled: nextOpenCode,
+                }
+              : item,
+          ),
+        };
+        return recomputeSkillsCatalog(optimistic);
+      });
+      try {
+        const data = await invoke<SkillsCatalogView>("set_skill_targets", {
+          skillId: skill.id,
+          codex: nextCodex,
+          opencode: nextOpenCode,
+        });
+        setSkillsCatalog(recomputeSkillsCatalog(data));
+        setSkillsError(null);
+      } catch (err) {
+        setSkillsError(`更新 Skills 开关失败: ${String(err)}`);
+        await loadSkillsCatalog(false);
+      } finally {
+        setSkillsBusyIds((prev) => {
+          const next = { ...prev };
+          delete next[skill.id];
+          return next;
+        });
+      }
+    },
+    [loadSkillsCatalog],
+  );
+
+  const onDeleteSkill = useCallback(
+    async (skill: SkillEntryView) => {
+      const approved = await confirm(
+        `确定删除技能 "${skill.name}" 吗？\n将从 Codex / OpenCode / 本地 Skills 中移除。`,
+        {
+          title: "删除技能",
+          kind: "warning",
+          okLabel: "删除",
+          cancelLabel: "取消",
+        },
+      );
+      if (!approved) {
+        return;
+      }
+      setSkillsBusyIds((prev) => ({ ...prev, [skill.id]: true }));
+      try {
+        const data = await invoke<SkillsCatalogView>("delete_skill", { skillId: skill.id });
+        setSkillsCatalog(recomputeSkillsCatalog(data));
+        setSkillsError(null);
+        setStatusText(`已删除技能: ${skill.name}`);
+        setSkillsDiscovery((prev) =>
+          prev
+            ? {
+                ...prev,
+                skills: prev.skills.map((item) =>
+                  item.directory.toLowerCase() === skill.directory.toLowerCase() ? { ...item, installed: false } : item,
+                ),
+              }
+            : prev,
+        );
+      } catch (err) {
+        setSkillsError(`删除技能失败: ${String(err)}`);
+      } finally {
+        setSkillsBusyIds((prev) => {
+          const next = { ...prev };
+          delete next[skill.id];
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const skillsSummaryText = useMemo(() => {
+    if (!skillsCatalog) {
+      return "已安装 · Skills: 0 · Codex: 0 · OpenCode: 0";
+    }
+    return `已安装 · Skills: ${skillsCatalog.total} · Codex: ${skillsCatalog.codexEnabledCount} · OpenCode: ${skillsCatalog.opencodeEnabledCount}`;
+  }, [skillsCatalog]);
+
+  const skillsDiscoverySummaryText = useMemo(() => {
+    if (!skillsDiscovery) {
+      return "发现来源 · 仓库: 0/0 · Skills: 0";
+    }
+    const enabledRepoCount = skillsDiscovery.repos.filter((repo) => repo.enabled).length;
+    return `发现来源 · 仓库: ${enabledRepoCount}/${skillsDiscovery.repos.length} · Skills: ${skillsDiscovery.total}`;
+  }, [skillsDiscovery]);
+
+  const filteredDiscoverySkills = useMemo(() => {
+    if (!skillsDiscovery) {
+      return [];
+    }
+    const keyword = skillsDiscoveryKeyword.trim().toLowerCase();
+    return skillsDiscovery.skills.filter((skill) => {
+      if (skillsDiscoveryInstallFilter === "installed" && !skill.installed) {
+        return false;
+      }
+      if (skillsDiscoveryInstallFilter === "notInstalled" && skill.installed) {
+        return false;
+      }
+      if (!keyword) {
+        return true;
+      }
+      const haystack = `${skill.name} ${skill.description} ${skill.repoOwner}/${skill.repoName}`.toLowerCase();
+      return haystack.includes(keyword);
+    });
+  }, [skillsDiscovery, skillsDiscoveryKeyword, skillsDiscoveryInstallFilter]);
+
+  const skillsDiscoverySyncingEmpty =
+    skillsDiscoveryRefreshing && !skillsDiscoveryLoading && (skillsDiscovery?.skills.length ?? 0) === 0;
+
+  const skillReposSyncingEmpty =
+    skillReposManageRefreshing && !skillReposManageLoading && (skillReposManage?.repos.length ?? 0) === 0;
+
+  const mcpSummaryText = useMemo(() => {
+    if (!mcpManage) {
+      return "已配置 0 个 MCP 服务器 · Codex: 0 · OpenCode: 0";
+    }
+    return `已配置 ${mcpManage.total} 个 MCP 服务器 · Codex: ${mcpManage.codexEnabledCount} · OpenCode: ${mcpManage.opencodeEnabledCount}`;
+  }, [mcpManage]);
+
+  const mcpSyncingEmpty =
+    mcpManageRefreshing && !mcpManageLoading && (mcpManage?.servers.length ?? 0) === 0;
+
+  useEffect(() => {
+    if (activeToolView !== "skills") {
+      return;
+    }
+    if (skillsCatalog || skillsLoading || skillsRefreshing) {
+      return;
+    }
+    void loadSkillsCatalog(true);
+  }, [activeToolView, loadSkillsCatalog, skillsCatalog, skillsLoading, skillsRefreshing]);
+
+  useEffect(() => {
+    if (activeToolView !== "skillsDiscovery") {
+      return;
+    }
+    if (skillsDiscovery || skillsDiscoveryLoading || skillsDiscoveryRefreshing) {
+      return;
+    }
+    void (async () => {
+      await loadSkillsDiscovery(true, false);
+      void loadSkillsDiscovery(false, true);
+    })();
+  }, [activeToolView, loadSkillsDiscovery, skillsDiscovery, skillsDiscoveryLoading, skillsDiscoveryRefreshing]);
+
+  useEffect(() => {
+    if (activeToolView !== "skillsRepos") {
+      return;
+    }
+    if (skillReposManage || skillReposManageLoading || skillReposManageRefreshing) {
+      return;
+    }
+    void (async () => {
+      await loadSkillReposManage(true, false);
+      void loadSkillReposManage(false, true);
+    })();
+  }, [activeToolView, loadSkillReposManage, skillReposManage, skillReposManageLoading, skillReposManageRefreshing]);
+
+  useEffect(() => {
+    if (activeToolView !== "mcp") {
+      return;
+    }
+    if (mcpManage || mcpManageLoading || mcpManageRefreshing) {
+      return;
+    }
+    void loadMcpManage(true);
+  }, [activeToolView, loadMcpManage, mcpManage, mcpManageLoading, mcpManageRefreshing]);
 
   const applyDashboard = useCallback((data: DashboardData, msg?: string) => {
     const currentProfileName = findProfileNameForCurrent(data);
@@ -2232,6 +3044,7 @@ function App() {
           </section>
         </div>
       ) : null}
+      {activeToolView === "dashboard" ? (
       <header className="top-bar">
         <div className="top-left">
           <img className="brand-logo" src={openaiLogo} alt="" aria-hidden />
@@ -2342,6 +3155,35 @@ function App() {
               <span className="switch-knob" />
             </span>
           </label>
+          <div className="top-tool-group" role="group" aria-label="工具面板切换">
+            <button
+              type="button"
+              className="top-tool-btn"
+              onClick={() => setActiveToolView("skills")}
+              title="Skills 管理"
+              aria-label="Skills 管理"
+            >
+              <Wrench className="tool-icon-lucide" />
+            </button>
+            <button
+              type="button"
+              className="top-tool-btn"
+              onClick={() => setActiveToolView("prompts")}
+              title="Prompts 面板"
+              aria-label="Prompts 面板"
+            >
+              <Book className="tool-icon-lucide" />
+            </button>
+            <button
+              type="button"
+              className="top-tool-btn"
+              onClick={() => setActiveToolView("mcp")}
+              title="MCP 服务器管理"
+              aria-label="MCP 服务器管理"
+            >
+              <McpIcon className="tool-icon-lucide" size={16} />
+            </button>
+          </div>
           <button className="header-icon" disabled={uiBusy} onClick={() => setSettingsOpen(true)} title="设置中心">
             ⚙
           </button>
@@ -2362,57 +3204,641 @@ function App() {
           />
         </div>
       </header>
-
-      <section className="summary">{currentLine}</section>
-      {quotaQuerying ? (
-        <section className="quota-querying" aria-live="polite">
-          <span className="status-spinner" aria-hidden />
-          <span>配额查询中...</span>
-        </section>
-      ) : null}
-      {!initialLoading && currentErrorText ? (
-        <div className="error-banner">当前账号读取失败: {currentErrorText}</div>
       ) : null}
 
-      <main className="cards-wrap">
-        {initialLoading ? (
-          <div className="loading-panel">
-            <span className="loading-spinner" aria-hidden />
-            <span className="loading-text">账号加载中...</span>
-          </div>
-        ) : filteredProfiles.length ? (
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            onDragEnd={(event) => void onDragEnd(event)}
-          >
-            <SortableContext items={profileIds} strategy={verticalListSortingStrategy}>
-              <div className="cards-list">
-                {filteredProfiles.map((p, idx) => (
-                  <SortableProfileCard
-                    key={p.name}
-                    profile={p}
-                    index={idx}
-                    selected={selected === p.name}
-                    isModeActive={modeActiveProfileName === p.name}
-                    busy={uiBusy}
-                    checkedAtOverride={getProfileCheckedAtForDisplay(p)}
-                    onSelect={setSelected}
-                    onRefreshQuota={(name) => void onRefreshSelectedQuota(name, false)}
-                    onApply={(name) => void onApplySelected(name)}
-                    onSetAlias={(name) => void onSetAlias(name)}
-                    onDelete={(name) => void onDeleteSelected(name)}
-                  />
-                ))}
+      {activeToolView === "dashboard" ? (
+        <>
+          <section className="summary">{currentLine}</section>
+          {quotaQuerying ? (
+            <section className="quota-querying" aria-live="polite">
+              <span className="status-spinner" aria-hidden />
+              <span>配额查询中...</span>
+            </section>
+          ) : null}
+          {!initialLoading && currentErrorText ? (
+            <div className="error-banner">当前账号读取失败: {currentErrorText}</div>
+          ) : null}
+
+          <main className="cards-wrap">
+            {initialLoading ? (
+              <div className="loading-panel">
+                <span className="loading-spinner" aria-hidden />
+                <span className="loading-text">账号加载中...</span>
               </div>
-            </SortableContext>
-          </DndContext>
-        ) : (
-          <div className="empty">
-            当前{activeAppMode === "gpt" ? "GPT" : "OpenCode"}分组暂无账号。点击右上角 + 添加账号（内嵌登录）。
-          </div>
-        )}
-      </main>
+            ) : filteredProfiles.length ? (
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={(event) => void onDragEnd(event)}
+              >
+                <SortableContext items={profileIds} strategy={verticalListSortingStrategy}>
+                  <div className="cards-list">
+                    {filteredProfiles.map((p, idx) => (
+                      <SortableProfileCard
+                        key={p.name}
+                        profile={p}
+                        index={idx}
+                        selected={selected === p.name}
+                        isModeActive={modeActiveProfileName === p.name}
+                        busy={uiBusy}
+                        checkedAtOverride={getProfileCheckedAtForDisplay(p)}
+                        onSelect={setSelected}
+                        onRefreshQuota={(name) => void onRefreshSelectedQuota(name, false)}
+                        onApply={(name) => void onApplySelected(name)}
+                        onSetAlias={(name) => void onSetAlias(name)}
+                        onDelete={(name) => void onDeleteSelected(name)}
+                      />
+                    ))}
+                  </div>
+                </SortableContext>
+              </DndContext>
+            ) : (
+              <div className="empty">
+                当前{activeAppMode === "gpt" ? "GPT" : "OpenCode"}分组暂无账号。点击右上角 + 添加账号（内嵌登录）。
+              </div>
+            )}
+          </main>
+        </>
+      ) : activeToolView === "skills" ? (
+        <main className="tools-pane-wrap">
+          <section className="skills-page-header">
+            <div className="skills-page-left">
+              <button
+                type="button"
+                className="skills-back-btn"
+                onClick={() => setActiveToolView("dashboard")}
+                title="返回账号列表"
+                aria-label="返回账号列表"
+              >
+                <ArrowLeft className="skills-back-icon" />
+              </button>
+              <h1 className="skills-inline-title">Skills 管理</h1>
+            </div>
+            <div className="skills-page-actions">
+              <button
+                type="button"
+                className="skills-head-action"
+                disabled={skillsLoading || skillsRefreshing}
+                onClick={() => void loadSkillsCatalog(false)}
+              >
+                <RefreshCw className="skills-head-action-icon" />
+                刷新
+              </button>
+              <button type="button" className="skills-head-action" onClick={() => void onSkillsInstallFromZip()}>
+                <FileArchive className="skills-head-action-icon" />
+                从 ZIP 安装
+              </button>
+              <button type="button" className="skills-head-action" onClick={() => void onSkillsImportExisting()}>
+                <Download className="skills-head-action-icon" />
+                导入已有
+              </button>
+              <button type="button" className="skills-head-action" onClick={() => void onSkillsDiscover()}>
+                <Search className="skills-head-action-icon" />
+                发现技能
+              </button>
+            </div>
+          </section>
+
+          <section className="skills-inline-summary">{skillsSummaryText}</section>
+
+          {skillsError ? <section className="skills-inline-error">{skillsError}</section> : null}
+
+          {skillsLoading ? (
+            <section className="skills-inline-empty">正在读取本地 Skills...</section>
+          ) : skillsCatalog && skillsCatalog.skills.length === 0 ? (
+            <section className="skills-inline-empty">
+              未找到 Skills，请检查 `~/.cc-switch/skills`、`~/.codex/skills`、`~/.config/opencode/skills`。
+            </section>
+          ) : (
+            <section className="skills-inline-list">
+              {skillsCatalog?.skills.map((skill) => {
+                const busy = !!skillsBusyIds[skill.id];
+                const codexAvailable = skill.codexAvailable;
+                const opencodeAvailable = skill.opencodeAvailable;
+                return (
+                  <article key={skill.id} className="skills-inline-item">
+                    <div className="skills-inline-main">
+                      <h2>{skill.name}</h2>
+                      <p>{skill.description}</p>
+                      <div className="skills-inline-meta">
+                        <span className="skills-inline-pill">本地</span>
+                        <span className="skills-inline-pill">{skill.source}</span>
+                      </div>
+                      <div className="skills-inline-path" title={skill.locations.join("\n")}>
+                        {skill.locations.join(" | ")}
+                      </div>
+                    </div>
+                    <div className="skills-inline-targets">
+                      <SkillTargetSwitch
+                        label="Codex"
+                        icon={openaiLogo}
+                        checked={skill.codexEnabled}
+                        busy={busy || !codexAvailable}
+                        onClick={() => void onToggleSkillTarget(skill, "codex")}
+                      />
+                      <SkillTargetSwitch
+                        label="OpenCode"
+                        icon={opencodeLogo}
+                        checked={skill.opencodeEnabled}
+                        busy={busy || !opencodeAvailable}
+                        onClick={() => void onToggleSkillTarget(skill, "opencode")}
+                      />
+                      <button
+                        type="button"
+                        className="skill-delete-btn"
+                        disabled={busy}
+                        onClick={() => void onDeleteSkill(skill)}
+                        title="删除该技能"
+                      >
+                        <Trash2 className="skill-delete-btn-icon" />
+                        删除
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </section>
+          )}
+        </main>
+      ) : activeToolView === "skillsDiscovery" ? (
+        <main className="tools-pane-wrap">
+          <section className="skills-page-header">
+            <div className="skills-page-left">
+              <button
+                type="button"
+                className="skills-back-btn"
+                onClick={() => setActiveToolView("skills")}
+                title="返回 Skills 管理"
+                aria-label="返回 Skills 管理"
+              >
+                <ArrowLeft className="skills-back-icon" />
+              </button>
+              <h1 className="skills-inline-title">Skills 发现</h1>
+            </div>
+            <div className="skills-page-actions">
+              <button
+                type="button"
+                className="skills-head-action"
+                disabled={skillsDiscoveryRefreshing}
+                onClick={() => void loadSkillsDiscovery(false, true)}
+              >
+                <RefreshCw className="skills-head-action-icon" />
+                刷新
+              </button>
+              <button type="button" className="skills-head-action" onClick={() => void onOpenSkillReposManage()}>
+                <Settings className="skills-head-action-icon" />
+                仓库管理
+              </button>
+            </div>
+          </section>
+
+          <section className="skills-inline-summary">{skillsDiscoverySummaryText}</section>
+
+          <section className="skills-discovery-toolbar">
+            <label className="skills-discovery-search">
+              <Search className="skills-discovery-search-icon" />
+              <input
+                type="text"
+                value={skillsDiscoveryKeyword}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setSkillsDiscoveryKeyword(event.target.value)}
+                placeholder="搜索技能名称或描述..."
+              />
+            </label>
+            <label className="skills-discovery-filter">
+              <div className="skills-discovery-select-wrap">
+                <select
+                  value={skillsDiscoveryInstallFilter}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    setSkillsDiscoveryInstallFilter(event.target.value as "all" | "installed" | "notInstalled")
+                  }
+                >
+                  <option value="all">全部</option>
+                  <option value="installed">已安装</option>
+                  <option value="notInstalled">未安装</option>
+                </select>
+                <ChevronDown className="skills-discovery-select-icon" />
+              </div>
+            </label>
+          </section>
+
+          {skillsDiscoveryError ? <section className="skills-inline-error">{skillsDiscoveryError}</section> : null}
+
+          {skillsDiscoveryLoading ? (
+            <section className="skills-inline-empty">正在读取发现技能...</section>
+          ) : skillsDiscoverySyncingEmpty ? (
+            <section className="skills-inline-empty skills-inline-loading">
+              <span className="status-spinner" aria-hidden />
+              <span>正在同步发现技能，请稍候...</span>
+            </section>
+          ) : filteredDiscoverySkills.length === 0 ? (
+            <section className="skills-inline-empty">当前筛选条件下没有可展示的技能。</section>
+          ) : (
+            <section className="skills-discovery-grid">
+              {filteredDiscoverySkills.map((skill) => (
+                <article key={skill.id} className="skills-discovery-card">
+                  <div className="skills-discovery-card-main">
+                    <h2>{skill.name}</h2>
+                    <span className="skills-discovery-repo-pill">
+                      {skill.repoOwner}/{skill.repoName}
+                    </span>
+                    <p>{skill.description}</p>
+                  </div>
+                  <div className="skills-discovery-card-actions">
+                    <button
+                      type="button"
+                      className="skills-discovery-btn ghost"
+                      onClick={() => void onOpenDiscoverSkillReadme(skill)}
+                    >
+                      <ExternalLink className="skills-discovery-btn-icon" />
+                      查看
+                    </button>
+                    <button
+                      type="button"
+                      className="skills-discovery-btn install"
+                      disabled={skill.installed || !!skillsDiscoveryInstallingIds[skill.id]}
+                      onClick={() => void onInstallDiscoverySkill(skill)}
+                      title={skill.installed ? "已安装" : "安装到 Codex/OpenCode 并同步到 CC 数据库"}
+                    >
+                      <Download className="skills-discovery-btn-icon" />
+                      {skillsDiscoveryInstallingIds[skill.id]
+                        ? "安装中..."
+                        : skill.installed
+                          ? "已安装"
+                          : "安装"}
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </section>
+          )}
+        </main>
+      ) : activeToolView === "skillsRepos" ? (
+        <main className="tools-pane-wrap">
+          <section className="skills-page-header">
+            <div className="skills-page-left">
+              <button
+                type="button"
+                className="skills-back-btn"
+                onClick={() => setActiveToolView("skillsDiscovery")}
+                title="返回 Skills 发现"
+                aria-label="返回 Skills 发现"
+              >
+                <ArrowLeft className="skills-back-icon" />
+              </button>
+              <h1 className="skills-inline-title">管理技能仓库</h1>
+            </div>
+            <div className="skills-page-actions">
+              <button
+                type="button"
+                className="skills-head-action"
+                disabled={skillReposManageRefreshing}
+                onClick={() => void loadSkillReposManage(false, true)}
+              >
+                <RefreshCw className="skills-head-action-icon" />
+                刷新
+              </button>
+            </div>
+          </section>
+
+          <section className="skill-repo-form-panel">
+            <h2>添加技能仓库</h2>
+            <label className="skill-repo-form-label">
+              <span>仓库 URL</span>
+              <input
+                type="text"
+                value={skillRepoInput}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setSkillRepoInput(event.target.value)}
+                placeholder="owner/name 或 https://github.com/owner/name"
+              />
+            </label>
+            <label className="skill-repo-form-label">
+              <span>分支</span>
+              <input
+                type="text"
+                value={skillRepoBranch}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setSkillRepoBranch(event.target.value)}
+                placeholder="main"
+              />
+            </label>
+            <button
+              type="button"
+              className="skill-repo-add-btn"
+              disabled={!!skillRepoActionBusyKeys.__add__}
+              onClick={() => void onAddSkillRepo()}
+            >
+              <Plus className="skill-repo-add-icon" />
+              添加仓库
+            </button>
+          </section>
+
+          {skillReposManageError ? <section className="skills-inline-error">{skillReposManageError}</section> : null}
+
+          <section className="skill-repo-list-panel">
+            <h2>已添加的仓库</h2>
+            {skillReposManageLoading ? (
+              <section className="skills-inline-empty">正在读取仓库...</section>
+            ) : skillReposSyncingEmpty ? (
+              <section className="skills-inline-empty skills-inline-loading">
+                <span className="status-spinner" aria-hidden />
+                <span>正在同步仓库信息，请稍候...</span>
+              </section>
+            ) : !skillReposManage?.repos.length ? (
+              <section className="skills-inline-empty">暂无仓库，先在上方添加一个。</section>
+            ) : (
+              <div className="skill-repo-list">
+                {skillReposManage.repos.map((repo) => {
+                  const rowKey = `${repo.owner}/${repo.name}`;
+                  const busy = !!skillRepoActionBusyKeys[rowKey];
+                  return (
+                    <article key={rowKey} className="skill-repo-item">
+                      <div className="skill-repo-item-main">
+                        <div className="skill-repo-item-title">{rowKey}</div>
+                        <div className="skill-repo-item-meta">
+                          <span className="skill-repo-meta-branch">分支: {repo.branch}</span>
+                          {repo.skillCount !== undefined && repo.skillCount !== null ? (
+                            <span className="skill-repo-meta-count-chip">识别到 {repo.skillCount} 个技能</span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="skill-repo-item-actions">
+                        <button
+                          type="button"
+                          className="skill-repo-item-btn"
+                          disabled={busy}
+                          onClick={() => void onOpenRepoHome(repo)}
+                          title="打开仓库"
+                        >
+                          <ExternalLink className="skill-repo-item-btn-icon" />
+                        </button>
+                        <button
+                          type="button"
+                          className="skill-repo-item-btn danger"
+                          disabled={busy}
+                          onClick={() => void onRemoveSkillRepo(repo)}
+                          title="删除仓库"
+                        >
+                          <Trash2 className="skill-repo-item-btn-icon" />
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </main>
+      ) : activeToolView === "mcp" ? (
+        <main className="tools-pane-wrap">
+          <section className="skills-page-header">
+            <div className="skills-page-left">
+              <button
+                type="button"
+                className="skills-back-btn"
+                onClick={() => setActiveToolView("dashboard")}
+                title="返回账号列表"
+                aria-label="返回账号列表"
+              >
+                <ArrowLeft className="skills-back-icon" />
+              </button>
+              <h1 className="skills-inline-title">MCP 服务器管理</h1>
+            </div>
+            <div className="skills-page-actions">
+              <button
+                type="button"
+                className="skills-head-action"
+                disabled={mcpManageRefreshing}
+                onClick={() => void onImportExistingMcp()}
+              >
+                <Download className="skills-head-action-icon" />
+                导入已有
+              </button>
+              <button
+                type="button"
+                className="skills-head-action"
+                onClick={() => {
+                  if (mcpAddOpen) {
+                    setMcpAddOpen(false);
+                    setMcpFormError(null);
+                    return;
+                  }
+                  resetMcpAddForm();
+                  setMcpAddOpen(true);
+                }}
+              >
+                <Plus className="skills-head-action-icon" />
+                {mcpAddOpen ? "取消添加" : "添加MCP"}
+              </button>
+            </div>
+          </section>
+
+          <section className="skills-inline-summary">{mcpSummaryText}</section>
+
+          {mcpAddOpen ? (
+            <section className="skill-repo-form-panel mcp-form-panel">
+              <h2>添加 MCP 服务器</h2>
+              <label className="skill-repo-form-label">
+                <span>MCP ID</span>
+                <input
+                  type="text"
+                  value={mcpFormId}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormId(event.target.value)}
+                  placeholder="例如: context7"
+                />
+              </label>
+              <label className="skill-repo-form-label">
+                <span>类型</span>
+                <div className="skills-discovery-select-wrap mcp-form-select-wrap">
+                  <select
+                    value={mcpFormType}
+                    onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                      setMcpFormType(event.target.value as "stdio" | "sse" | "http")
+                    }
+                  >
+                    <option value="stdio">stdio (本地命令)</option>
+                    <option value="sse">sse (远程)</option>
+                    <option value="http">http (远程)</option>
+                  </select>
+                  <ChevronDown className="skills-discovery-select-icon" />
+                </div>
+              </label>
+
+              {mcpFormType === "stdio" ? (
+                <>
+                  <label className="skill-repo-form-label">
+                    <span>command</span>
+                    <input
+                      type="text"
+                      value={mcpFormCommand}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormCommand(event.target.value)}
+                      placeholder="例如: npx"
+                    />
+                  </label>
+                  <label className="skill-repo-form-label">
+                    <span>args (空格分隔，或 JSON 数组)</span>
+                    <input
+                      type="text"
+                      value={mcpFormArgs}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormArgs(event.target.value)}
+                      placeholder='例如: -y @upstash/context7-mcp 或 ["-y","pkg"]'
+                    />
+                  </label>
+                  <label className="skill-repo-form-label">
+                    <span>env (JSON 对象，可选)</span>
+                    <textarea
+                      value={mcpFormEnv}
+                      onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setMcpFormEnv(event.target.value)}
+                      placeholder='例如: {"API_KEY":"xxx"}'
+                      rows={4}
+                    />
+                  </label>
+                </>
+              ) : (
+                <label className="skill-repo-form-label">
+                  <span>URL</span>
+                  <input
+                    type="text"
+                    value={mcpFormUrl}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormUrl(event.target.value)}
+                    placeholder="例如: https://mcp.context7.com/mcp"
+                  />
+                </label>
+              )}
+
+              <div className="mcp-form-targets">
+                <label className="mcp-form-target">
+                  <input
+                    type="checkbox"
+                    checked={mcpFormCodexEnabled}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormCodexEnabled(event.target.checked)}
+                  />
+                  <img src={openaiLogo} alt="" aria-hidden className="skill-target-icon" />
+                  <span>Codex</span>
+                </label>
+                <label className="mcp-form-target">
+                  <input
+                    type="checkbox"
+                    checked={mcpFormOpencodeEnabled}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setMcpFormOpencodeEnabled(event.target.checked)}
+                  />
+                  <img src={opencodeLogo} alt="" aria-hidden className="skill-target-icon" />
+                  <span>OpenCode</span>
+                </label>
+              </div>
+
+              {mcpFormError ? <div className="mcp-form-error">{mcpFormError}</div> : null}
+
+              <button
+                type="button"
+                className="skill-repo-add-btn"
+                disabled={!!mcpBusyIds.__add__}
+                onClick={() => void onSubmitMcpAdd()}
+              >
+                <Plus className="skill-repo-add-icon" />
+                {mcpBusyIds.__add__ ? "添加中..." : "添加MCP"}
+              </button>
+            </section>
+          ) : null}
+
+          {mcpManageError ? <section className="skills-inline-error">{mcpManageError}</section> : null}
+
+          {mcpManageLoading ? (
+            <section className="skills-inline-empty">正在读取 MCP 服务器...</section>
+          ) : mcpSyncingEmpty ? (
+            <section className="skills-inline-empty skills-inline-loading">
+              <span className="status-spinner" aria-hidden />
+              <span>正在同步 MCP 配置，请稍候...</span>
+            </section>
+          ) : !mcpManage?.servers.length ? (
+            <section className="skills-inline-empty mcp-inline-empty">
+              <span className="mcp-empty-icon-wrap">
+                <Server className="mcp-empty-icon" />
+              </span>
+              <span className="mcp-empty-title">暂无服务器</span>
+              <span className="mcp-empty-text">点击右上角按钮添加第一个 MCP 服务器</span>
+            </section>
+          ) : (
+            <section className="skills-inline-list">
+              {mcpManage.servers.map((server) => {
+                const busy = !!mcpBusyIds[server.id];
+                const hasDocLink = !!server.docUrl;
+                return (
+                  <article key={server.id} className="skills-inline-item">
+                    <div className="skills-inline-main">
+                      <h2>{server.name || server.id}</h2>
+                      <p>{server.description}</p>
+                      <div className="skills-inline-meta">
+                        <span className="skills-inline-pill">{server.kind ? server.kind.toUpperCase() : "MCP"}</span>
+                        <span className="skills-inline-pill">{server.source}</span>
+                        {hasDocLink ? (
+                          <button
+                            type="button"
+                            className="skills-inline-link-btn"
+                            onClick={() => onOpenMcpDoc(server)}
+                            title={server.docUrl || server.endpointUrl || ""}
+                          >
+                            <ExternalLink className="skills-inline-link-icon" />
+                            文档
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="skills-inline-path" title={server.id}>
+                        {server.id}
+                      </div>
+                    </div>
+                    <div className="skills-inline-targets">
+                      <SkillTargetSwitch
+                        label="Codex"
+                        icon={openaiLogo}
+                        checked={server.codexEnabled}
+                        busy={busy || !server.codexAvailable}
+                        onClick={() => void onToggleMcpTarget(server, "codex")}
+                      />
+                      <SkillTargetSwitch
+                        label="OpenCode"
+                        icon={opencodeLogo}
+                        checked={server.opencodeEnabled}
+                        busy={busy || !server.opencodeAvailable}
+                        onClick={() => void onToggleMcpTarget(server, "opencode")}
+                      />
+                      <button
+                        type="button"
+                        className="skill-delete-btn"
+                        disabled={busy}
+                        onClick={() => void onRemoveMcpServer(server)}
+                        title="删除该 MCP 服务器"
+                      >
+                        <Trash2 className="skill-delete-btn-icon" />
+                        删除
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </section>
+          )}
+        </main>
+      ) : (
+        <main className="tools-pane-wrap">
+          <section className="tools-view-header">
+            <div className="tools-view-left">
+              <button
+                type="button"
+                className="skills-back-btn"
+                onClick={() => setActiveToolView("dashboard")}
+                title="返回账号列表"
+                aria-label="返回账号列表"
+              >
+                <ArrowLeft className="skills-back-icon" />
+              </button>
+              <h1 className="skills-inline-title">Prompts 面板</h1>
+            </div>
+          </section>
+          <section className="tools-placeholder-panel">
+            <h2>Prompts</h2>
+            <p>按钮已接入为 CC Switch 同款三按钮结构。Prompts 内容后续可继续扩展。</p>
+          </section>
+        </main>
+      )}
 
       <footer className="status-bar">
         <span className="status-listener-group">
