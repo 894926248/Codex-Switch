@@ -553,6 +553,12 @@ struct CcSwitchSkillDbRow {
     installed_at: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CcSwitchSkillTargetFlags {
+    codex_enabled: bool,
+    opencode_enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupManifest {
@@ -1465,6 +1471,53 @@ fn ccswitch_load_installed_readme_urls(conn: &Connection) -> CmdResult<HashSet<S
         if !value.trim().is_empty() {
             out.insert(value);
         }
+    }
+    Ok(out)
+}
+
+fn ccswitch_load_skill_target_flags_map() -> CmdResult<HashMap<String, CcSwitchSkillTargetFlags>> {
+    let db_path = ccswitch_db_file()?;
+    if !db_path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let conn = Connection::open(&db_path)
+        .map_err(|e| format!("打开 CC Switch 数据库失败 ({}): {e}", db_path.display()))?;
+    let _ = conn.busy_timeout(Duration::from_millis(1500));
+    if !ccswitch_db_has_skills_table(&conn)? {
+        return Ok(HashMap::new());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT directory, enabled_codex, enabled_opencode
+             FROM skills
+             WHERE directory IS NOT NULL AND trim(directory) <> ''
+             ORDER BY installed_at DESC",
+        )
+        .map_err(|e| format!("读取 CC Switch skills 开关状态失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })
+        .map_err(|e| format!("遍历 CC Switch skills 开关状态失败: {e}"))?;
+
+    let mut out: HashMap<String, CcSwitchSkillTargetFlags> = HashMap::new();
+    for item in rows {
+        let (directory, codex_enabled, opencode_enabled) =
+            item.map_err(|e| format!("解析 CC Switch skills 开关状态失败: {e}"))?;
+        let key = directory.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        out.entry(key).or_insert(CcSwitchSkillTargetFlags {
+            codex_enabled,
+            opencode_enabled,
+        });
     }
     Ok(out)
 }
@@ -2618,6 +2671,7 @@ fn sync_skills_to_ccswitch_db(skills: &[SkillEntryView]) -> CmdResult<()> {
 
 fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
     ensure_ccswitch_ssot_seeded()?;
+    let target_flags = ccswitch_load_skill_target_flags_map()?;
 
     let mut merged: BTreeMap<String, SkillScanEntry> = BTreeMap::new();
     scan_skill_root(&ccswitch_ssot_skills_dir()?, SkillScanSource::Ssot, &mut merged)?;
@@ -2633,6 +2687,11 @@ fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
         .into_values()
         .map(|mut entry| {
             let opencode_present = entry.opencode_source || entry.opencode_legacy_source;
+            let flags = target_flags.get(&entry.directory.to_lowercase());
+            let codex_enabled = flags.map(|item| item.codex_enabled).unwrap_or(entry.codex_source);
+            let opencode_enabled = flags
+                .map(|item| item.opencode_enabled)
+                .unwrap_or(opencode_present);
             let has_source = entry.ssot_source || entry.codex_source || opencode_present;
             let source = skill_source_label(&entry);
             entry.locations.sort();
@@ -2642,8 +2701,8 @@ fn load_skills_catalog_internal() -> CmdResult<SkillsCatalogView> {
                 directory: entry.directory,
                 name: entry.name,
                 description: entry.description,
-                codex_enabled: entry.codex_source,
-                opencode_enabled: opencode_present,
+                codex_enabled,
+                opencode_enabled,
                 codex_available: has_source,
                 opencode_available: has_source,
                 source,
@@ -2707,6 +2766,11 @@ fn set_skill_targets_internal(
             remove_skill_from_target_dir(&skill.directory, &root)?;
         }
     }
+
+    let mut updated_skill = skill.clone();
+    updated_skill.codex_enabled = codex;
+    updated_skill.opencode_enabled = opencode;
+    sync_skills_to_ccswitch_db(&[updated_skill])?;
 
     load_skills_catalog_internal()
 }
