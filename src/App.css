@@ -771,6 +771,21 @@ button {
   gap: 10px;
 }
 
+.tools-pane-wrap-sticky-head {
+  position: relative;
+}
+
+.tools-pane-sticky-head {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg);
+  padding-bottom: 2px;
+}
+
 .tools-view-header {
   display: flex;
   align-items: center;

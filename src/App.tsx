@@ -3612,61 +3612,63 @@ function App() {
           </section>
         </main>
       ) : activeToolView === "mcp" ? (
-        <main className="tools-pane-wrap">
-          <section className="skills-page-header">
-            <div className="skills-page-left">
-              <button
-                type="button"
-                className="skills-back-btn"
-                onClick={() => setActiveToolView("dashboard")}
-                title="返回账号列表"
-                aria-label="返回账号列表"
-              >
-                <ArrowLeft className="skills-back-icon" />
-              </button>
-              <h1 className="skills-inline-title">MCP 服务器管理</h1>
-            </div>
-            <div className="skills-page-actions">
-              <button
-                type="button"
-                className="skills-head-action"
-                disabled={mcpManageLoading || mcpManageRefreshing}
-                onClick={() => void onRefreshMcpManage()}
-                title={mcpManageRefreshing ? "MCP 刷新中..." : "刷新 MCP"}
-                aria-label={mcpManageRefreshing ? "MCP 刷新中" : "刷新 MCP"}
-              >
-                <RefreshCw className={`skills-head-action-icon ${mcpManageRefreshing ? "icon-spin" : ""}`} />
-                {mcpManageRefreshing ? "刷新中..." : "刷新"}
-              </button>
-              <button
-                type="button"
-                className="skills-head-action"
-                disabled={mcpManageRefreshing}
-                onClick={() => void onImportExistingMcp()}
-              >
-                <Download className="skills-head-action-icon" />
-                导入已有
-              </button>
-              <button
-                type="button"
-                className="skills-head-action"
-                onClick={() => {
-                  if (mcpAddOpen) {
-                    setMcpAddOpen(false);
-                    setMcpFormError(null);
-                    return;
-                  }
-                  resetMcpAddForm();
-                  setMcpAddOpen(true);
-                }}
-              >
-                <Plus className="skills-head-action-icon" />
-                {mcpAddOpen ? "取消添加" : "添加MCP"}
-              </button>
-            </div>
-          </section>
+        <main className="tools-pane-wrap tools-pane-wrap-sticky-head">
+          <div className="tools-pane-sticky-head">
+            <section className="skills-page-header">
+              <div className="skills-page-left">
+                <button
+                  type="button"
+                  className="skills-back-btn"
+                  onClick={() => setActiveToolView("dashboard")}
+                  title="返回账号列表"
+                  aria-label="返回账号列表"
+                >
+                  <ArrowLeft className="skills-back-icon" />
+                </button>
+                <h1 className="skills-inline-title">MCP 服务器管理</h1>
+              </div>
+              <div className="skills-page-actions">
+                <button
+                  type="button"
+                  className="skills-head-action"
+                  disabled={mcpManageLoading || mcpManageRefreshing}
+                  onClick={() => void onRefreshMcpManage()}
+                  title={mcpManageRefreshing ? "MCP 刷新中..." : "刷新 MCP"}
+                  aria-label={mcpManageRefreshing ? "MCP 刷新中" : "刷新 MCP"}
+                >
+                  <RefreshCw className={`skills-head-action-icon ${mcpManageRefreshing ? "icon-spin" : ""}`} />
+                  {mcpManageRefreshing ? "刷新中..." : "刷新"}
+                </button>
+                <button
+                  type="button"
+                  className="skills-head-action"
+                  disabled={mcpManageRefreshing}
+                  onClick={() => void onImportExistingMcp()}
+                >
+                  <Download className="skills-head-action-icon" />
+                  导入已有
+                </button>
+                <button
+                  type="button"
+                  className="skills-head-action"
+                  onClick={() => {
+                    if (mcpAddOpen) {
+                      setMcpAddOpen(false);
+                      setMcpFormError(null);
+                      return;
+                    }
+                    resetMcpAddForm();
+                    setMcpAddOpen(true);
+                  }}
+                >
+                  <Plus className="skills-head-action-icon" />
+                  {mcpAddOpen ? "取消添加" : "添加MCP"}
+                </button>
+              </div>
+            </section>
 
-          <section className="skills-inline-summary">{mcpSummaryText}</section>
+            <section className="skills-inline-summary">{mcpSummaryText}</section>
+          </div>
 
           {mcpAddOpen ? (
             <section className="skill-repo-form-panel mcp-form-panel">
