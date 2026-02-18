@@ -7801,7 +7801,7 @@ fn load_dashboard_internal_for_mode(
     let mut store = load_store()?;
     let now_ms = now_ts_ms();
     let need_gpt_current = !matches!(mode, Some(AutoSwitchMode::OpenCode));
-    let need_opencode_current = !matches!(mode, Some(AutoSwitchMode::Gpt));
+    let need_opencode_current = true;
     let mut current = None;
     let opencode_current = if need_opencode_current {
         load_live_opencode_current_status(&store, sync_current, now_ms)

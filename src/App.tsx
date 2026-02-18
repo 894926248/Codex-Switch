@@ -325,6 +325,8 @@ const LIVE_STATUS_BURST_WINDOW_MS = 3000;
 const LIVE_STATUS_BURST_THRESHOLD = 6;
 const LIVE_STATUS_BURST_COOLDOWN_MS = 900;
 const LIVE_STATUS_DISPLAY_STALE_MS = 4200;
+const STARTUP_LOAD_TIMEOUT_MS = 8000;
+const STARTUP_BACKGROUND_SYNC_DELAY_MS = 120;
 const DASHBOARD_WAIT_STEP_MS = 250;
 const DASHBOARD_WAIT_MAX_STEPS = 40;
 const AUTO_SEAMLESS_STORAGE_KEY = "codex-switch.autoSeamlessSwitch";
@@ -411,6 +413,40 @@ function readActiveProfileByModeStorage(): ActiveProfileByMode {
   } catch {
     return fallback;
   }
+}
+
+function withTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return task;
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(new Error(`${label}超时（>${Math.floor(timeoutMs / 1000)}秒）`));
+    }, timeoutMs);
+    task.then(
+      (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -1750,13 +1786,21 @@ function App() {
   }, []);
 
   const loadDashboard = useCallback(
-    async (syncCurrent = true, msg?: string, markInitialDone = false) => {
+    async (
+      syncCurrent = true,
+      msg?: string,
+      markInitialDone = false,
+      timeoutMs?: number,
+    ) => {
       setBusy(true);
       try {
-        const data = await invoke<DashboardData>("load_dashboard", {
+        const mode = activeAppModeRef.current;
+        const task = invoke<DashboardData>("load_dashboard", {
           syncCurrent,
-          mode: activeAppModeRef.current,
+          mode,
         });
+        const data =
+          mode === "opencode" ? await withTimeout(task, timeoutMs ?? 0, "加载账号") : await task;
         applyDashboard(data, msg);
         if (data.currentError) {
           const detail = formatCurrentErrorWithProfile(data, data.currentError) ?? data.currentError;
@@ -1775,7 +1819,27 @@ function App() {
   );
 
   useEffect(() => {
-    void loadDashboard(true, "已加载", true);
+    const startupMode = activeAppModeRef.current;
+    if (startupMode !== "opencode") {
+      void loadDashboard(true, "已加载", true);
+      return;
+    }
+    let cancelled = false;
+    const bootstrap = async () => {
+      await loadDashboard(false, "已加载", true, STARTUP_LOAD_TIMEOUT_MS);
+      if (cancelled) {
+        return;
+      }
+      window.setTimeout(() => {
+        if (!cancelled) {
+          void loadDashboard(true);
+        }
+      }, STARTUP_BACKGROUND_SYNC_DELAY_MS);
+    };
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
   }, [loadDashboard]);
 
   const refreshCurrentDashboardSilent = useCallback(async () => {
