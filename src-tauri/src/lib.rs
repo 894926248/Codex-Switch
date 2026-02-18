@@ -213,6 +213,7 @@ const AUTO_SWITCH_SESSION_SCAN_INTERVAL_MS: i64 = 3_000;
 const AUTO_SWITCH_SESSION_QUOTA_MAX_AGE_MS: i64 = 120_000;
 const AUTO_SWITCH_CODEX_LOG_SCAN_INTERVAL_MS: i64 = 3_000;
 const AUTO_SWITCH_OPENCODE_LOG_SCAN_INTERVAL_MS: i64 = 3_000;
+const AUTO_SWITCH_LIVE_QUOTA_SYNC_INTERVAL_MS: i64 = 2_500;
 const OPENCODE_LOG_RECENT_WINDOW_MS: i64 = 120_000;
 const CURRENT_QUOTA_CACHE_FRESH_MS: i64 = 3_000;
 const CURRENT_QUOTA_CACHE_MAX_AGE_MS: i64 = 30 * 60 * 1000;
@@ -774,6 +775,7 @@ struct AutoSwitchRuntime {
     thread_recover_cooldown_until_ms: i64,
     state_index_purge_cooldown_until_ms: i64,
     last_switch_applied_at_ms: i64,
+    last_live_quota_sync_at_ms: i64,
 }
 
 #[derive(Debug, Default)]
@@ -10521,6 +10523,69 @@ fn current_quota_for_trigger(
     }
 }
 
+fn update_session_quota_snapshot_from_account(
+    runtime: &mut AutoSwitchRuntime,
+    quota: &AccountQuota,
+    now_ms: i64,
+) {
+    runtime.session.quota.five_hour_remaining_percent =
+        quota.five_hour.as_ref().and_then(|v| v.remaining_percent);
+    runtime.session.quota.one_week_remaining_percent =
+        quota.one_week.as_ref().and_then(|v| v.remaining_percent);
+    runtime.session.quota.updated_at_ms = Some(now_ms);
+}
+
+fn fetch_live_quota_for_trigger(
+    mode: AutoSwitchMode,
+    store: &StoreData,
+) -> CmdResult<AccountQuota> {
+    match mode {
+        AutoSwitchMode::Gpt => fetch_quota_from_codex_home(&codex_home()?, false),
+        AutoSwitchMode::OpenCode => {
+            let live_workspace_id = live_opencode_workspace_id_internal();
+            fetch_quota_from_live_opencode_auth().or_else(|primary_err| {
+                fetch_quota_from_opencode_profile_snapshot(store, live_workspace_id.as_deref())
+                    .map_err(|fallback_err| format!("{primary_err}；快照回退失败: {fallback_err}"))
+            })
+        }
+    }
+}
+
+fn maybe_sync_live_quota_for_trigger(
+    runtime: &mut AutoSwitchRuntime,
+    mode: AutoSwitchMode,
+    store: &StoreData,
+    now_ms: i64,
+    force: bool,
+) {
+    if !force
+        && runtime.last_live_quota_sync_at_ms > 0
+        && now_ms - runtime.last_live_quota_sync_at_ms < AUTO_SWITCH_LIVE_QUOTA_SYNC_INTERVAL_MS
+    {
+        return;
+    }
+    runtime.last_live_quota_sync_at_ms = now_ms;
+
+    match fetch_live_quota_for_trigger(mode, store) {
+        Ok(quota) => {
+            let refreshed_at = now_ts_ms();
+            update_session_quota_snapshot_from_account(runtime, &quota, refreshed_at);
+            if matches!(mode, AutoSwitchMode::Gpt) {
+                update_current_quota_runtime_cache(&quota, refreshed_at);
+            } else {
+                update_opencode_quota_runtime_cache(&quota, refreshed_at);
+            }
+        }
+        Err(err) => {
+            if matches!(mode, AutoSwitchMode::Gpt) {
+                mark_current_quota_runtime_error(&err, now_ms);
+            } else {
+                mark_opencode_quota_runtime_error(&err, now_ms);
+            }
+        }
+    }
+}
+
 fn soft_trigger_hit(five_hour: Option<i64>, one_week: Option<i64>) -> bool {
     five_hour
         .map(|v| v <= SOFT_TRIGGER_FIVE_HOUR_THRESHOLD)
@@ -10537,6 +10602,20 @@ fn candidate_quota_ok(five_hour: Option<i64>, one_week: Option<i64>) -> bool {
         && one_week
             .map(|v| v > CANDIDATE_MIN_ONE_WEEK)
             .unwrap_or(false)
+}
+
+fn profile_candidate_ready(store: &StoreData, name: &str) -> bool {
+    let Some(record) = store.profiles.get(name).and_then(Value::as_object) else {
+        return false;
+    };
+    let Ok(snapshot_dir) = record_snapshot_dir(name, record) else {
+        return false;
+    };
+    if profile_validity(record, &snapshot_dir) != "正常" {
+        return false;
+    }
+    let (five, _, week, _) = quota_fields_from_record(record);
+    candidate_quota_ok(five, week)
 }
 
 fn sync_session_tail_for_mode(
@@ -10853,6 +10932,8 @@ fn auto_switch_tick_internal(
     }
 
     let store_for_trigger = load_store()?;
+    maybe_sync_live_quota_for_trigger(runtime, mode, &store_for_trigger, now_ms, false);
+    now_ms = now_ts_ms();
     let active_profile_name = match mode {
         AutoSwitchMode::Gpt => store_for_trigger.active_profile.clone(),
         AutoSwitchMode::OpenCode => {
@@ -10931,19 +11012,12 @@ fn auto_switch_tick_internal(
             continue;
         }
         checked += 1;
-        let _ = refresh_one_profile_quota(&mut store, &name, false);
-        let Some(record) = store.profiles.get(&name).and_then(Value::as_object) else {
-            continue;
-        };
-        let Ok(snapshot_dir) = record_snapshot_dir(&name, record) else {
-            continue;
-        };
-        let validity = profile_validity(record, &snapshot_dir);
-        if validity != "正常" {
+        let refreshed = refresh_one_profile_quota(&mut store, &name, false)
+            || refresh_one_profile_quota(&mut store, &name, true);
+        if !refreshed {
             continue;
         }
-        let (five, _, week, _) = quota_fields_from_record(record);
-        if candidate_quota_ok(five, week) {
+        if profile_candidate_ready(&store, &name) {
             picked = Some(name);
             break;
         }
@@ -10966,6 +11040,50 @@ fn auto_switch_tick_internal(
         runtime.switch_cooldown_until_ms = now_ms + AUTO_SWITCH_SWITCH_COOLDOWN_MS;
         let mut result = AutoSwitchTickResult::new("guard_cancelled");
         result.message = Some("切号前检测到会话状态变化，已取消本次切号。".to_string());
+        fill_pending_reason(&mut result, runtime);
+        return Ok(result);
+    }
+
+    now_ms = now_ts_ms();
+    maybe_sync_live_quota_for_trigger(runtime, mode, &store, now_ms, true);
+    now_ms = now_ts_ms();
+    let active_profile_name = match mode {
+        AutoSwitchMode::Gpt => store.active_profile.clone(),
+        AutoSwitchMode::OpenCode => {
+            let live_workspace_id = live_opencode_workspace_id_internal();
+            find_profile_name_by_identity_prefer_existing(
+                &store,
+                live_workspace_id.as_deref(),
+                None,
+            )
+        }
+    };
+    let (latest_five, latest_week) = current_quota_for_trigger(
+        runtime,
+        &store,
+        now_ms,
+        active_profile_name.as_deref(),
+    );
+    if runtime.pending_reason == Some(TriggerReason::Soft)
+        && !soft_trigger_hit(latest_five, latest_week)
+    {
+        runtime.pending_reason = None;
+        runtime.switch_cooldown_until_ms = now_ms + AUTO_SWITCH_SWITCH_COOLDOWN_MS;
+        let mut result = AutoSwitchTickResult::new("recheck_cancelled");
+        result.message = Some("切号前复检发现额度已恢复，已取消本次无感换号。".to_string());
+        return Ok(result);
+    }
+
+    let target_refreshed = refresh_one_profile_quota(&mut store, &target_profile, false)
+        || refresh_one_profile_quota(&mut store, &target_profile, true);
+    let target_ready = target_refreshed && profile_candidate_ready(&store, &target_profile);
+    save_store(&store)?;
+    if !target_ready {
+        now_ms = now_ts_ms();
+        runtime.no_candidate_until_ms = now_ms + AUTO_SWITCH_NO_CANDIDATE_COOLDOWN_MS;
+        let mut result = AutoSwitchTickResult::new("candidate_recheck_failed");
+        result.message =
+            Some("候选账号复检未通过（可能额度已变更或登录态失效），已取消本次切号。".to_string());
         fill_pending_reason(&mut result, runtime);
         return Ok(result);
     }
