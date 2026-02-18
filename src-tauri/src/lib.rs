@@ -214,9 +214,15 @@ const AUTO_SWITCH_SESSION_QUOTA_MAX_AGE_MS: i64 = 120_000;
 const AUTO_SWITCH_CODEX_LOG_SCAN_INTERVAL_MS: i64 = 3_000;
 const AUTO_SWITCH_OPENCODE_LOG_SCAN_INTERVAL_MS: i64 = 3_000;
 const AUTO_SWITCH_LIVE_QUOTA_SYNC_INTERVAL_MS: i64 = 2_500;
+const AUTO_SWITCH_LIVE_QUOTA_ERROR_COOLDOWN_MS: i64 = 12_000;
+const AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS: u64 = 3;
+const AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS: u64 = 3;
 const OPENCODE_LOG_RECENT_WINDOW_MS: i64 = 120_000;
 const CURRENT_QUOTA_CACHE_FRESH_MS: i64 = 3_000;
 const CURRENT_QUOTA_CACHE_MAX_AGE_MS: i64 = 30 * 60 * 1000;
+const CURRENT_QUOTA_ERROR_COOLDOWN_MS: i64 = 8_000;
+const APP_SERVER_TIMEOUT_DEFAULT_SECONDS: u64 = 14;
+const APP_SERVER_TIMEOUT_POLL_SECONDS: u64 = 3;
 const AUTO_SWITCH_THREAD_RECOVER_COOLDOWN_MS: i64 = 5_000;
 const AUTO_SWITCH_THREAD_RECOVER_HARD_COOLDOWN_MS: i64 = 12_000;
 const AUTO_SWITCH_NEW_CHAT_RESET_COOLDOWN_MS: i64 = 30_000;
@@ -5960,7 +5966,11 @@ fn app_server_request(
     Ok(got)
 }
 
-fn fetch_quota_from_codex_home(codex_home: &Path, refresh_token: bool) -> CmdResult<AccountQuota> {
+fn fetch_quota_from_codex_home_with_timeout(
+    codex_home: &Path,
+    refresh_token: bool,
+    timeout_seconds: u64,
+) -> CmdResult<AccountQuota> {
     let requests = vec![
         json!({
             "id": 1,
@@ -5979,7 +5989,7 @@ fn fetch_quota_from_codex_home(codex_home: &Path, refresh_token: bool) -> CmdRes
         }),
     ];
 
-    let responses = app_server_request(codex_home, &requests, 14)?;
+    let responses = app_server_request(codex_home, &requests, timeout_seconds)?;
     let account = responses
         .get(&2)
         .and_then(|v| v.get("result"))
@@ -6045,6 +6055,14 @@ fn fetch_quota_from_codex_home(codex_home: &Path, refresh_token: bool) -> CmdRes
         five_hour,
         one_week,
     })
+}
+
+fn fetch_quota_from_codex_home(codex_home: &Path, refresh_token: bool) -> CmdResult<AccountQuota> {
+    fetch_quota_from_codex_home_with_timeout(
+        codex_home,
+        refresh_token,
+        APP_SERVER_TIMEOUT_DEFAULT_SECONDS,
+    )
 }
 
 fn extract_opencode_account_id_from_jwt(token: &str) -> Option<String> {
@@ -6256,7 +6274,7 @@ fn write_codex_auth_from_opencode_entry(
         .map_err(|e| format!("写入 OpenCode 桥接 auth.json 失败 {}: {e}", auth_path.display()))
 }
 
-fn fetch_quota_from_live_opencode_auth() -> CmdResult<AccountQuota> {
+fn fetch_quota_from_live_opencode_auth_with_timeout(timeout_seconds: u64) -> CmdResult<AccountQuota> {
     let auth_path = opencode_auth_file()?;
     let entry = read_openai_entry_from_opencode_auth_file(&auth_path)
         .ok_or_else(|| "OpenCode 未登录或缺少 openai 登录态。".to_string())?;
@@ -6272,11 +6290,15 @@ fn fetch_quota_from_live_opencode_auth() -> CmdResult<AccountQuota> {
     let bridge_home = opencode_quota_bridge_home()?;
     write_codex_auth_from_opencode_entry(&bridge_home, &openai_entry)?;
 
-    let mut quota = fetch_quota_from_codex_home(&bridge_home, false)?;
+    let mut quota = fetch_quota_from_codex_home_with_timeout(&bridge_home, false, timeout_seconds)?;
     if quota.workspace_id.as_deref().unwrap_or("").trim().is_empty() {
         quota.workspace_id = fallback_workspace_id;
     }
     Ok(quota)
+}
+
+fn fetch_quota_from_live_opencode_auth() -> CmdResult<AccountQuota> {
+    fetch_quota_from_live_opencode_auth_with_timeout(APP_SERVER_TIMEOUT_DEFAULT_SECONDS)
 }
 
 fn sync_opencode_snapshot_from_live_auth_best_effort(target_dir: &Path) {
@@ -7296,7 +7318,12 @@ fn build_auto_profile_base(quota: &AccountQuota) -> String {
     }
 }
 
-fn refresh_one_profile_quota(store: &mut StoreData, name: &str, refresh_token: bool) -> bool {
+fn refresh_one_profile_quota_with_timeout(
+    store: &mut StoreData,
+    name: &str,
+    refresh_token: bool,
+    timeout_seconds: u64,
+) -> bool {
     let Some(record_value) = store.profiles.get(name).cloned() else {
         return false;
     };
@@ -7325,7 +7352,7 @@ fn refresh_one_profile_quota(store: &mut StoreData, name: &str, refresh_token: b
         return false;
     }
 
-    match fetch_quota_from_codex_home(&snapshot_dir, refresh_token) {
+    match fetch_quota_from_codex_home_with_timeout(&snapshot_dir, refresh_token, timeout_seconds) {
         Ok(quota) => {
             record.insert(
                 "email".to_string(),
@@ -7367,6 +7394,15 @@ fn refresh_one_profile_quota(store: &mut StoreData, name: &str, refresh_token: b
             false
         }
     }
+}
+
+fn refresh_one_profile_quota(store: &mut StoreData, name: &str, refresh_token: bool) -> bool {
+    refresh_one_profile_quota_with_timeout(
+        store,
+        name,
+        refresh_token,
+        APP_SERVER_TIMEOUT_DEFAULT_SECONDS,
+    )
 }
 
 fn quota_fields_from_record(
@@ -7565,6 +7601,28 @@ fn mark_opencode_quota_runtime_error(err: &str, now_ms: i64) {
     mark_quota_runtime_error(opencode_current_quota_runtime_cache(), err, now_ms);
 }
 
+fn quota_runtime_error_is_hot(
+    cache: &Mutex<CurrentQuotaRuntimeCache>,
+    now_ms: i64,
+    cooldown_ms: i64,
+) -> bool {
+    let Ok(cache) = cache.lock() else {
+        return false;
+    };
+    if cache.last_error_at_ms <= 0 {
+        return false;
+    }
+    now_ms.saturating_sub(cache.last_error_at_ms) < cooldown_ms
+}
+
+fn current_quota_runtime_error_is_hot(now_ms: i64, cooldown_ms: i64) -> bool {
+    quota_runtime_error_is_hot(current_quota_runtime_cache(), now_ms, cooldown_ms)
+}
+
+fn opencode_quota_runtime_error_is_hot(now_ms: i64, cooldown_ms: i64) -> bool {
+    quota_runtime_error_is_hot(opencode_current_quota_runtime_cache(), now_ms, cooldown_ms)
+}
+
 fn cached_quota_matches_workspace_id(quota: &AccountQuota, workspace_id: Option<&str>) -> bool {
     let live = workspace_id
         .map(str::trim)
@@ -7640,9 +7698,10 @@ fn auto_sync_current_account_to_list(
     Ok(auto_name)
 }
 
-fn fetch_quota_from_opencode_profile_snapshot(
+fn fetch_quota_from_opencode_profile_snapshot_with_timeout(
     store: &StoreData,
     workspace_id: Option<&str>,
+    timeout_seconds: u64,
 ) -> CmdResult<AccountQuota> {
     let profile_name = find_profile_name_by_identity_prefer_existing(store, workspace_id, None)
         .ok_or_else(|| "OpenCode 当前账号未映射到已保存账号快照。".to_string())?;
@@ -7652,7 +7711,18 @@ fn fetch_quota_from_opencode_profile_snapshot(
         .and_then(Value::as_object)
         .ok_or_else(|| format!("账号记录缺失: {profile_name}"))?;
     let snapshot_dir = record_snapshot_dir(&profile_name, record)?;
-    fetch_quota_from_codex_home(&snapshot_dir, false)
+    fetch_quota_from_codex_home_with_timeout(&snapshot_dir, false, timeout_seconds)
+}
+
+fn fetch_quota_from_opencode_profile_snapshot(
+    store: &StoreData,
+    workspace_id: Option<&str>,
+) -> CmdResult<AccountQuota> {
+    fetch_quota_from_opencode_profile_snapshot_with_timeout(
+        store,
+        workspace_id,
+        APP_SERVER_TIMEOUT_DEFAULT_SECONDS,
+    )
 }
 
 fn load_live_opencode_current_status(
@@ -7679,6 +7749,14 @@ fn load_live_opencode_current_status(
             .as_ref()
             .map(|(quota, _)| current_status_from_quota(store, quota));
     }
+    if !sync_current
+        && opencode_quota_runtime_error_is_hot(now_ms, CURRENT_QUOTA_ERROR_COOLDOWN_MS)
+        && cached_quota.is_some()
+    {
+        return cached_quota
+            .as_ref()
+            .map(|(quota, _)| current_status_from_quota(store, quota));
+    }
 
     let process_count = get_opencode_process_count_internal();
     if process_count == 0 {
@@ -7687,8 +7765,18 @@ fn load_live_opencode_current_status(
             .map(|(quota, _)| current_status_from_quota(store, quota));
     }
 
-    let quota_result = fetch_quota_from_live_opencode_auth().or_else(|primary_err| {
-        fetch_quota_from_opencode_profile_snapshot(store, live_workspace_id.as_deref())
+    let quota_timeout_seconds = if sync_current {
+        APP_SERVER_TIMEOUT_DEFAULT_SECONDS
+    } else {
+        APP_SERVER_TIMEOUT_POLL_SECONDS
+    };
+    let quota_result =
+        fetch_quota_from_live_opencode_auth_with_timeout(quota_timeout_seconds).or_else(|primary_err| {
+        fetch_quota_from_opencode_profile_snapshot_with_timeout(
+            store,
+            live_workspace_id.as_deref(),
+            quota_timeout_seconds,
+        )
             .map_err(|fallback_err| format!("{primary_err}；快照回退失败: {fallback_err}"))
     });
 
@@ -7732,9 +7820,23 @@ fn load_dashboard_internal(sync_current: bool) -> CmdResult<DashboardData> {
             return Ok(build_dashboard(&store, current, opencode_current, current_error));
         }
     }
+    if !sync_current
+        && current_quota_runtime_error_is_hot(now_ms, CURRENT_QUOTA_ERROR_COOLDOWN_MS)
+        && cached_quota.is_some()
+    {
+        if let Some((quota, _)) = cached_quota.as_ref() {
+            current = Some(current_status_from_quota(&store, quota));
+            return Ok(build_dashboard(&store, current, opencode_current, current_error));
+        }
+    }
 
     // Prefer live ~/.codex; fallback to recent cache when host/limit endpoint transiently fails.
-    match fetch_quota_from_codex_home(&codex_home, false) {
+    let quota_timeout_seconds = if sync_current {
+        APP_SERVER_TIMEOUT_DEFAULT_SECONDS
+    } else {
+        APP_SERVER_TIMEOUT_POLL_SECONDS
+    };
+    match fetch_quota_from_codex_home_with_timeout(&codex_home, false, quota_timeout_seconds) {
         Ok(quota) => {
             update_current_quota_runtime_cache(&quota, now_ms);
             if sync_current {
@@ -10540,13 +10642,22 @@ fn fetch_live_quota_for_trigger(
     store: &StoreData,
 ) -> CmdResult<AccountQuota> {
     match mode {
-        AutoSwitchMode::Gpt => fetch_quota_from_codex_home(&codex_home()?, false),
+        AutoSwitchMode::Gpt => fetch_quota_from_codex_home_with_timeout(
+            &codex_home()?,
+            false,
+            AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS,
+        ),
         AutoSwitchMode::OpenCode => {
             let live_workspace_id = live_opencode_workspace_id_internal();
-            fetch_quota_from_live_opencode_auth().or_else(|primary_err| {
-                fetch_quota_from_opencode_profile_snapshot(store, live_workspace_id.as_deref())
+            fetch_quota_from_live_opencode_auth_with_timeout(AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS)
+                .or_else(|primary_err| {
+                    fetch_quota_from_opencode_profile_snapshot_with_timeout(
+                        store,
+                        live_workspace_id.as_deref(),
+                        AUTO_SWITCH_LIVE_QUOTA_TIMEOUT_SECONDS,
+                    )
                     .map_err(|fallback_err| format!("{primary_err}；快照回退失败: {fallback_err}"))
-            })
+                })
         }
     }
 }
@@ -10563,6 +10674,16 @@ fn maybe_sync_live_quota_for_trigger(
         && now_ms - runtime.last_live_quota_sync_at_ms < AUTO_SWITCH_LIVE_QUOTA_SYNC_INTERVAL_MS
     {
         return;
+    }
+    if !force {
+        let recent_error = if matches!(mode, AutoSwitchMode::Gpt) {
+            current_quota_runtime_error_is_hot(now_ms, AUTO_SWITCH_LIVE_QUOTA_ERROR_COOLDOWN_MS)
+        } else {
+            opencode_quota_runtime_error_is_hot(now_ms, AUTO_SWITCH_LIVE_QUOTA_ERROR_COOLDOWN_MS)
+        };
+        if recent_error {
+            return;
+        }
     }
     runtime.last_live_quota_sync_at_ms = now_ms;
 
@@ -10932,8 +11053,6 @@ fn auto_switch_tick_internal(
     }
 
     let store_for_trigger = load_store()?;
-    maybe_sync_live_quota_for_trigger(runtime, mode, &store_for_trigger, now_ms, false);
-    now_ms = now_ts_ms();
     let active_profile_name = match mode {
         AutoSwitchMode::Gpt => store_for_trigger.active_profile.clone(),
         AutoSwitchMode::OpenCode => {
@@ -10957,6 +11076,34 @@ fn auto_switch_tick_internal(
         Some(TriggerReason::Soft) if !soft_hit => runtime.pending_reason = None,
         None if soft_hit => runtime.pending_reason = Some(TriggerReason::Soft),
         _ => {}
+    }
+    if runtime.pending_reason.is_some() {
+        maybe_sync_live_quota_for_trigger(runtime, mode, &store_for_trigger, now_ms, false);
+        now_ms = now_ts_ms();
+        let active_profile_name = match mode {
+            AutoSwitchMode::Gpt => store_for_trigger.active_profile.clone(),
+            AutoSwitchMode::OpenCode => {
+                let live_workspace_id = live_opencode_workspace_id_internal();
+                find_profile_name_by_identity_prefer_existing(
+                    &store_for_trigger,
+                    live_workspace_id.as_deref(),
+                    None,
+                )
+            }
+        };
+        let (live_five, live_week) = current_quota_for_trigger(
+            runtime,
+            &store_for_trigger,
+            now_ms,
+            active_profile_name.as_deref(),
+        );
+        let live_soft_hit = soft_trigger_hit(live_five, live_week);
+        match runtime.pending_reason {
+            Some(TriggerReason::Hard) => {}
+            Some(TriggerReason::Soft) if !live_soft_hit => runtime.pending_reason = None,
+            None if live_soft_hit => runtime.pending_reason = Some(TriggerReason::Soft),
+            _ => {}
+        }
     }
 
     if runtime.pending_reason.is_none() {
@@ -11012,8 +11159,17 @@ fn auto_switch_tick_internal(
             continue;
         }
         checked += 1;
-        let refreshed = refresh_one_profile_quota(&mut store, &name, false)
-            || refresh_one_profile_quota(&mut store, &name, true);
+        let refreshed = refresh_one_profile_quota_with_timeout(
+            &mut store,
+            &name,
+            false,
+            AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS,
+        ) || refresh_one_profile_quota_with_timeout(
+            &mut store,
+            &name,
+            true,
+            AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS,
+        );
         if !refreshed {
             continue;
         }
@@ -11074,8 +11230,17 @@ fn auto_switch_tick_internal(
         return Ok(result);
     }
 
-    let target_refreshed = refresh_one_profile_quota(&mut store, &target_profile, false)
-        || refresh_one_profile_quota(&mut store, &target_profile, true);
+    let target_refreshed = refresh_one_profile_quota_with_timeout(
+        &mut store,
+        &target_profile,
+        false,
+        AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS,
+    ) || refresh_one_profile_quota_with_timeout(
+        &mut store,
+        &target_profile,
+        true,
+        AUTO_SWITCH_CANDIDATE_REFRESH_TIMEOUT_SECONDS,
+    );
     let target_ready = target_refreshed && profile_candidate_ready(&store, &target_profile);
     save_store(&store)?;
     if !target_ready {
