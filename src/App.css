@@ -1546,7 +1546,7 @@ button {
   font-size: 14px;
   line-height: 1.55;
   padding: 12px;
-  min-height: 180px;
+  min-height: 120px;
   resize: vertical;
   outline: none;
   transition: border-color 0.16s ease, box-shadow 0.16s ease;

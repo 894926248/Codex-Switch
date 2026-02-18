@@ -4030,7 +4030,7 @@ function App() {
               value={mcpFormConfig}
               onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setMcpFormConfig(event.target.value)}
               spellCheck={false}
-              rows={10}
+              rows={6}
               placeholder={MCP_CONFIG_PLACEHOLDER}
             />
             <button type="button" className="mcp-json-format-btn" onClick={onFormatMcpConfig}>
