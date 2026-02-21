@@ -1,0 +1,12 @@
+C:\Users\89492\Desktop\python\ChatGPT\codex-switch\src-tauri/target-check\debug\deps\tar-4cdeba28311fe9bc.d: C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\lib.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\archive.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\builder.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\entry.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\entry_type.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\error.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\header.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\pax.rs
+
+C:\Users\89492\Desktop\python\ChatGPT\codex-switch\src-tauri/target-check\debug\deps\libtar-4cdeba28311fe9bc.rmeta: C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\lib.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\archive.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\builder.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\entry.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\entry_type.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\error.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\header.rs C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\pax.rs
+
+C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\lib.rs:
+C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\archive.rs:
+C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\builder.rs:
+C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\entry.rs:
+C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\entry_type.rs:
+C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\error.rs:
+C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\header.rs:
+C:\Users\89492\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.44\src\pax.rs:

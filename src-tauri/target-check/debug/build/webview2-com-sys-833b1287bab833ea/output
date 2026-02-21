@@ -1,0 +1,2 @@
+cargo:rustc-link-search=native=C:\Users\89492\Desktop\python\ChatGPT\codex-switch\src-tauri/target-check\debug\build\webview2-com-sys-833b1287bab833ea\out\x64
+cargo:rustc-link-lib=advapi32

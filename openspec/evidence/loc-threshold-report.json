@@ -1,0 +1,125 @@
+{
+  "rust": {
+    "count": 11,
+    "max_file": {
+      "path": "src-tauri/src/domain/skills.rs",
+      "loc": 493
+    },
+    "top10": [
+      {
+        "path": "src-tauri/src/domain/skills.rs",
+        "loc": 493
+      },
+      {
+        "path": "src-tauri/src/commands/mod.rs",
+        "loc": 454
+      },
+      {
+        "path": "src-tauri/src/constants.rs",
+        "loc": 250
+      },
+      {
+        "path": "src-tauri/src/paths.rs",
+        "loc": 142
+      },
+      {
+        "path": "src-tauri/src/models.rs",
+        "loc": 103
+      },
+      {
+        "path": "src-tauri/src/util/mod.rs",
+        "loc": 16
+      },
+      {
+        "path": "src-tauri/src/main.rs",
+        "loc": 6
+      },
+      {
+        "path": "src-tauri/src/lib.rs",
+        "loc": 5
+      },
+      {
+        "path": "src-tauri/src/domain/runtime_core.rs",
+        "loc": 4
+      },
+      {
+        "path": "src-tauri/build.rs",
+        "loc": 3
+      }
+    ]
+  },
+  "tsx": {
+    "count": 4,
+    "max_file": {
+      "path": "src/views/components/AppWidgets.tsx",
+      "loc": 240
+    },
+    "top10": [
+      {
+        "path": "src/views/components/AppWidgets.tsx",
+        "loc": 240
+      },
+      {
+        "path": "src/main.tsx",
+        "loc": 4
+      },
+      {
+        "path": "src/App.tsx",
+        "loc": 1
+      },
+      {
+        "path": "src/AppShell.tsx",
+        "loc": 1
+      }
+    ]
+  },
+  "css": {
+    "count": 15,
+    "max_file": {
+      "path": "src/App.styles.part01.css",
+      "loc": 500
+    },
+    "top10": [
+      {
+        "path": "src/App.styles.part01.css",
+        "loc": 500
+      },
+      {
+        "path": "src/App.styles.part02.css",
+        "loc": 500
+      },
+      {
+        "path": "src/App.styles.part03.css",
+        "loc": 500
+      },
+      {
+        "path": "src/App.styles.part04.css",
+        "loc": 500
+      },
+      {
+        "path": "src/App.styles.part05.css",
+        "loc": 500
+      },
+      {
+        "path": "src/App.styles.part06.css",
+        "loc": 453
+      },
+      {
+        "path": "src/App.part01.css",
+        "loc": 434
+      },
+      {
+        "path": "src/App.part04.css",
+        "loc": 423
+      },
+      {
+        "path": "src/App.part02.css",
+        "loc": 421
+      },
+      {
+        "path": "src/App.part06.css",
+        "loc": 421
+      }
+    ]
+  }
+}

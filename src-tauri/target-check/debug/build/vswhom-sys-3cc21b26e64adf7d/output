@@ -1,0 +1,81 @@
+cargo:rerun-if-changed=build.rs
+cargo:rerun-if-changed=ext/vswhom.cpp
+OPT_LEVEL = Some(0)
+OUT_DIR = Some(C:\Users\89492\Desktop\python\ChatGPT\codex-switch\src-tauri/target-check\debug\build\vswhom-sys-3cc21b26e64adf7d\out)
+TARGET = Some(x86_64-pc-windows-msvc)
+CARGO_ENCODED_RUSTFLAGS = Some()
+cargo:rerun-if-env-changed=VCINSTALLDIR
+VCINSTALLDIR = None
+cargo:rerun-if-env-changed=VSTEL_MSBuildProjectFullPath
+VSTEL_MSBuildProjectFullPath = None
+cargo:rerun-if-env-changed=VCToolsVersion
+VCToolsVersion = None
+cargo:rerun-if-env-changed=VSCMD_ARG_VCVARS_SPECTRE
+VSCMD_ARG_VCVARS_SPECTRE = None
+cargo:rerun-if-env-changed=WindowsSdkDir
+WindowsSdkDir = None
+cargo:rerun-if-env-changed=WindowsSDKVersion
+WindowsSDKVersion = None
+cargo:rerun-if-env-changed=LIB
+LIB = Some(E:\masm32\lib;c:\program files (x86)\microsoft visual studio\mfc\lib;c:\program files (x86)\microsoft visual studio\lib;C:\Program Files (x86)\Microsoft Visual Studio\VC98\mfc\lib;C:\Program Files (x86)\Microsoft Visual Studio\VC98\lib;C:\Program Files\alibabacloud-oss-cpp-sdk\lib;)
+PATH = Some(C:\Users\89492\Desktop\python\ChatGPT\codex-switch\src-tauri/target-check\debug\deps;C:\Users\89492\Desktop\python\ChatGPT\codex-switch\src-tauri/target-check\debug;C:\Users\89492\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib;C:\Program Files\Git\mingw64\bin;C:\Program Files\Git\usr\bin;C:\Users\89492\bin;C:\Python314\Scripts;C:\Python314;C:\Program Files\Eclipse Adoptium\jdk-18.0.2.101-hotspot\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin;C:\Program Files (x86)\Razer Chroma SDK\bin;C:\Program Files\Razer Chroma SDK\bin;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32\OpenSSH;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\dotnet;C:\Program Files (x86)\Internet Explorer\iexplore.exe;C:\Program Files\Internet Explorer\iexplore.exe;C:\Users\89492\AppData\Local\Android\Sdk\platform-tools;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit;C:\Program Files\CMake\bin;C:\Program Files (x86)\Microsoft SQL Server\100\Tools\Binn;C:\Program Files\Microsoft SQL Server\100\Tools\Binn;C:\Program Files\Microsoft SQL Server\100\DTS\Binn;C:\Users\89492\AppData\Local\Android\Sdk\build-tools\34.0.0;C:\Program Files\PuTTY;C:\Program Files (x86)\pcsuite;C:\Users\89492\AppData\Local\Android\Sdk\ndk\26.1.10909125;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0;C:\WINDOWS\System32\OpenSSH;C:\Users\89492\AppData\Local\Android\Sdk\ndk\26.1.10909125\toolchains\llvm\prebuilt\windows-x86_64\bin;C:\Program Files\SoundSwitch;C:\Program Files\Redis;C:\Program Files\nodejs;C:\ProgramData\chocolatey\bin;C:\Program Files\apache-maven-3.8.9\bin;C:\Program Files\MySQL\MySQL Server 8.0\bin;C:\Program Files\Git\cmd;C:\Program Files\PowerShell\7;C:\Users\89492\AppData\Local\Programs\Trae\bin;C:\Users\89492\.cargo\bin;E:\masm32\bin;C:\Program Files\MySQL\MySQL Shell 8.0\bin;C:\Users\89492\AppData\Local\Programs\Python\Python39\Scripts;C:\Users\89492\AppData\Local\Programs\Python\Python39;C:\Users\89492\AppData\Local\Programs\Python\Python312\Scripts;C:\Users\89492\AppData\Local\Programs\Python\Python312;C:\Users\89492\AppData\Local\Programs\Python\Python38\Scripts;C:\Users\89492\AppData\Local\Programs\Python\Python38;C:\Program Files (x86)\Microsoft Visual Studio\VC6.0\Tools\WinNT;C:\Program Files (x86)\Microsoft Visual Studio\VC6.0\MSDev98\Bin;C:\Program Files (x86)\Microsoft Visual Studio\VC6.0\Tools;C:\program files (x86)\microsoft visual studio\bin;C:\Program Files (x86)\Microsoft Visual Studio\Common\Tools\WinNT;C:\Program Files (x86)\Microsoft Visual Studio\Common\MSDev98\Bin;C:\Program Files (x86)\Microsoft Visual Studio\Common\Tools;C:\Program Files (x86)\Microsoft Visual Studio\VC98\bin;C:\Users\89492\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Bandizip;C:\Program Files (x86)\Internet Explorer\iexplore.exe;C:\Program Files\Internet Explorer\iexplore.exe;C:\Users\89492\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\89492\AppData\Local\Programs\Fiddler;C:\IDA_Pro_v7.5_Portable\SDK75\flair75\bin\win;C:\jdk18\bin;C:\Users\89492\.lmstudio\bin;C:\Users\89492\Desktop\aria2\aria2-1.37.0-win-64bit-build1;C:\Program Files\iperf-3.19-win64-static-auth;C:\Users\89492\AppData\Local\Microsoft\WindowsApps;C:\Users\89492\AppData\Local\Microsoft\WinGet\Links;C:\Program Files\JetBrains\PyCharm 2025.3.1\bin;C:\Program Files\alibabacloud-oss-cpp-sdk\bin;C:\Users\89492\AppData\Roaming\npm;C:\Users\89492\AppData\Local\Programs\cursor\resources\app\bin;C:\Users\89492\.dotnet\tools;C:\Users\89492\AppData\Local\squirrel\bin;C:\Users\89492\AppData\Local\Programs\Kiro\bin;C:\Users\89492\AppData\Local\Programs\Windsurf\bin;C:\Users\89492\.local\bin;C:\Users\89492\AppData\Local\GitHubDesktop\bin;C:\Users\89492\AppData\Roaming\Python\Python314\Scripts;C:\Users\89492\AppData\Local\Programs\Warp\bin;C:\Users\89492\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin)
+cargo:rerun-if-env-changed=INCLUDE
+INCLUDE = Some(E:\masm32\include;c:\program files (x86)\microsoft visual studio\atl\include;c:\program files (x86)\microsoft visual studio\mfc\include;c:\program files (x86)\microsoft visual studio\include;C:\Program Files (x86)\Microsoft Visual Studio\VC98\atl\include;C:\Program Files (x86)\Microsoft Visual Studio\VC98\mfc\include;C:\Program Files (x86)\Microsoft Visual Studio\VC98\include;C:\Program Files\alibabacloud-oss-cpp-sdk\include;C:\lib\aliyun-oss-cpp-sdk-1.10.0\sdk\include;)
+HOST = Some(x86_64-pc-windows-msvc)
+cargo:rerun-if-env-changed=CXX_x86_64-pc-windows-msvc
+CXX_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CXX_x86_64_pc_windows_msvc
+CXX_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CXX
+HOST_CXX = None
+cargo:rerun-if-env-changed=CXX
+CXX = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+CARGO_CFG_TARGET_FEATURE = Some(cmpxchg16b,fxsr,sse,sse2,sse3)
+DEBUG = Some(false)
+cargo:rerun-if-env-changed=CXXFLAGS
+CXXFLAGS = None
+cargo:rerun-if-env-changed=HOST_CXXFLAGS
+HOST_CXXFLAGS = None
+cargo:rerun-if-env-changed=CXXFLAGS_x86_64_pc_windows_msvc
+CXXFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=CXXFLAGS_x86_64-pc-windows-msvc
+CXXFLAGS_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+vswhom.cpp
+ext/vswhom.cpp(213): warning C4267: “=”: 从“size_t”转换到“int”，可能丢失数据
+ext/vswhom.cpp(216): warning C4267: “=”: 从“size_t”转换到“int”，可能丢失数据
+ext/vswhom.cpp(431): warning C4456: “hr”的声明隐藏了上一个本地声明
+ext/vswhom.cpp(418): note: 参见“hr”的声明
+ext/vswhom.cpp(459): warning C4244: “参数”: 从“LONGLONG”转换到“int”，可能丢失数据
+ext/vswhom.cpp(502): warning C4456: “rc”的声明隐藏了上一个本地声明
+ext/vswhom.cpp(410): note: 参见“rc”的声明
+cargo:rerun-if-env-changed=AR_x86_64-pc-windows-msvc
+AR_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=AR_x86_64_pc_windows_msvc
+AR_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_AR
+HOST_AR = None
+cargo:rerun-if-env-changed=AR
+AR = None
+cargo:rerun-if-env-changed=ARFLAGS
+ARFLAGS = None
+cargo:rerun-if-env-changed=HOST_ARFLAGS
+HOST_ARFLAGS = None
+cargo:rerun-if-env-changed=ARFLAGS_x86_64_pc_windows_msvc
+ARFLAGS_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=ARFLAGS_x86_64-pc-windows-msvc
+ARFLAGS_x86_64-pc-windows-msvc = None
+cargo:rustc-link-lib=static=vswhom
+cargo:rustc-link-search=native=C:\Users\89492\Desktop\python\ChatGPT\codex-switch\src-tauri/target-check\debug\build\vswhom-sys-3cc21b26e64adf7d\out
+cargo:rerun-if-env-changed=CXXSTDLIB_x86_64-pc-windows-msvc
+CXXSTDLIB_x86_64-pc-windows-msvc = None
+cargo:rerun-if-env-changed=CXXSTDLIB_x86_64_pc_windows_msvc
+CXXSTDLIB_x86_64_pc_windows_msvc = None
+cargo:rerun-if-env-changed=HOST_CXXSTDLIB
+HOST_CXXSTDLIB = None
+cargo:rerun-if-env-changed=CXXSTDLIB
+CXXSTDLIB = None
+cargo:rustc-link-lib=dylib=OleAut32
+cargo:rustc-link-lib=dylib=Ole32
