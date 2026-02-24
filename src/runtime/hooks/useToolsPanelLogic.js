@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo } from "react";
-import { invoke } from "../../adapters/tauri";
+import {
+  loadMcpManageCommand,
+  loadSkillReposManageCommand,
+  loadSkillsCatalogCommand,
+  loadSkillsDiscoveryCommand,
+} from "../../adapters/commands";
 import { recomputeMcpManage, recomputeSkillsCatalog } from "../../utils";
 import { useMcpPanelActions } from "./toolsPanel/useMcpPanelActions";
 import { useSkillsPanelActions } from "./toolsPanel/useSkillsPanelActions";
@@ -48,7 +53,7 @@ export function useToolsPanelLogic(ctx) {
         setSkillsRefreshing(true);
       }
       try {
-        const data = await invoke("load_skills_catalog");
+        const data = await loadSkillsCatalogCommand();
         setSkillsCatalog(recomputeSkillsCatalog(data));
         setSkillsError(null);
         return true;
@@ -80,7 +85,7 @@ export function useToolsPanelLogic(ctx) {
         setSkillsDiscoveryRefreshing(true);
       }
       try {
-        const data = await invoke("load_skills_discovery", { syncRemote });
+        const data = await loadSkillsDiscoveryCommand(syncRemote);
         setSkillsDiscovery(data);
         setSkillsDiscoveryError(null);
       } catch (err) {
@@ -106,7 +111,7 @@ export function useToolsPanelLogic(ctx) {
         setSkillReposManageRefreshing(true);
       }
       try {
-        const data = await invoke("load_skill_repos_manage", { refreshCount });
+        const data = await loadSkillReposManageCommand(refreshCount);
         setSkillReposManage(data);
         setSkillReposManageError(null);
       } catch (err) {
@@ -132,7 +137,7 @@ export function useToolsPanelLogic(ctx) {
         setMcpManageRefreshing(true);
       }
       try {
-        const data = await invoke("load_mcp_manage");
+        const data = await loadMcpManageCommand();
         setMcpManage(recomputeMcpManage(data));
         setMcpManageError(null);
         return true;

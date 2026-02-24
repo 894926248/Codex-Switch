@@ -83,6 +83,61 @@ fn apply_quota_to_profile_record(record: &mut Map<String, Value>, quota: &Accoun
     record.insert("updated_at".to_string(), Value::String(now_iso()));
 }
 
+fn fallback_profile_name_for_live_sync(store: &StoreData, quota: &AccountQuota) -> Option<String> {
+    let target_workspace = normalize_identity_value(quota.workspace_id.as_deref());
+    let target_email = normalize_identity_value(quota.email.as_deref());
+
+    let mut workspace_matches: Vec<String> = Vec::new();
+    let mut email_matches: Vec<String> = Vec::new();
+
+    for name in list_profile_names(store) {
+        let Some(record) = store.profiles.get(&name).and_then(Value::as_object) else {
+            continue;
+        };
+        let rec_workspace =
+            normalize_identity_value(read_workspace_id_from_record_or_auth(&name, record).as_deref());
+        let rec_email = read_email_from_record(record);
+
+        if let Some(target) = target_workspace.as_deref() {
+            if rec_workspace.as_deref() == Some(target) {
+                workspace_matches.push(name.clone());
+            }
+        }
+        if let Some(target) = target_email.as_deref() {
+            if rec_email.as_deref() == Some(target) {
+                email_matches.push(name);
+            }
+        }
+    }
+
+    let choose_active = |candidates: &[String]| -> Option<String> {
+        let active = store.active_profile.as_deref()?;
+        candidates
+            .iter()
+            .find(|name| name.as_str() == active)
+            .cloned()
+    };
+
+    if target_workspace.is_some() {
+        if workspace_matches.len() == 1 {
+            return workspace_matches.into_iter().next();
+        }
+        if workspace_matches.is_empty() {
+            return None;
+        }
+        if let Some(active) = choose_active(&workspace_matches) {
+            return Some(active);
+        }
+        return workspace_matches.into_iter().next();
+    }
+
+    if target_email.is_some() && email_matches.len() == 1 {
+        return email_matches.into_iter().next();
+    }
+
+    None
+}
+
 fn sync_live_quota_to_store(
     store: &mut StoreData,
     quota: &AccountQuota,
@@ -94,7 +149,9 @@ fn sync_live_quota_to_store(
         store,
         quota.workspace_id.as_deref(),
         quota.email.as_deref(),
-    ) else {
+    )
+    .or_else(|| fallback_profile_name_for_live_sync(store, quota))
+    else {
         return;
     };
     let sync_key = format!(

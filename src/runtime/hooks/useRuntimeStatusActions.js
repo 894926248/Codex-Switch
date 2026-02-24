@@ -1,5 +1,13 @@
 import { useCallback } from "react";
-import { invoke } from "../../adapters/tauri";
+import {
+  getCodexExtensionInfoCommand,
+  getOpenCodeMonitorStatusCommand,
+  getVsCodeStatusCommand,
+  installCodexHookCommand,
+  isCodexHookInstalledCommand,
+  reloadVsCodeWindowCommand,
+  runPostSwitchActionCommand,
+} from "../../adapters/commands";
 import { stringArrayEqual } from "../../utils";
 
 export function useRuntimeStatusActions(ctx) {
@@ -25,7 +33,7 @@ export function useRuntimeStatusActions(ctx) {
 
   const refreshVsCodeStatus = useCallback(async (silent = false, editorTarget = settingsEditorTarget) => {
     try {
-      const status = await invoke("get_vscode_status", { editorTarget });
+      const status = await getVsCodeStatusCommand(editorTarget);
       setVsCodeStatus((prev) => {
         if (prev && prev.running === status.running && prev.processCount === status.processCount) {
           return prev;
@@ -46,7 +54,7 @@ export function useRuntimeStatusActions(ctx) {
 
   const refreshOpenCodeMonitorStatus = useCallback(async (silent = false) => {
     try {
-      const status = await invoke("get_opencode_monitor_status");
+      const status = await getOpenCodeMonitorStatusCommand();
       setOpenCodeMonitorStatus((prev) => {
         if (prev && prev.authReady === status.authReady && prev.running === status.running && prev.processCount === status.processCount && prev.logReady === status.logReady && prev.logRecent === status.logRecent && (prev.lastLogAgeMs ?? null) === (status.lastLogAgeMs ?? null) && prev.activityRecent === status.activityRecent && (prev.lastActivityAgeMs ?? null) === (status.lastActivityAgeMs ?? null) && (prev.activitySource ?? null) === (status.activitySource ?? null)) {
           return prev;
@@ -68,7 +76,7 @@ export function useRuntimeStatusActions(ctx) {
   const refreshCodexExtensionInfo = useCallback(
     async (silent = false) => {
       try {
-        const info = await invoke("get_codex_extension_info");
+        const info = await getCodexExtensionInfoCommand();
         setCodexExtInfo((prev) => {
           if (prev && prev.currentVersion === info.currentVersion && stringArrayEqual(prev.allVersions, info.allVersions)) {
             return prev;
@@ -92,7 +100,7 @@ export function useRuntimeStatusActions(ctx) {
   const refreshHookStatus = useCallback(
     async (silent = false, editorTarget = settingsEditorTarget) => {
       try {
-        const installed = await invoke("is_codex_hook_installed", { editorTarget });
+        const installed = await isCodexHookInstalledCommand(editorTarget);
         setHookInstalled((prev) => prev === installed ? prev : installed);
         if (!silent && postSwitchStrategy === "hook" && !installed) {
           setStatusText("检测到方案2 Hook 提速版未注入，可在设置中心一键注入。");
@@ -112,10 +120,7 @@ export function useRuntimeStatusActions(ctx) {
   const runPostSwitchStrategy = useCallback(
     async (strategy, fromAutoSwitch) => {
       const effectiveStrategy = fromAutoSwitch && strategy === "restart_extension_host" ? "hook" : strategy;
-      const result = await invoke("run_post_switch_action", {
-        strategy: effectiveStrategy,
-        editorTarget: settingsEditorTarget
-      });
+      const result = await runPostSwitchActionCommand(effectiveStrategy, settingsEditorTarget);
       if (!fromAutoSwitch) {
         setStatusText(result);
       }
@@ -133,7 +138,7 @@ export function useRuntimeStatusActions(ctx) {
         setStatusText("未检测到 VS Code 正在运行，请先启动 VS Code。");
         return;
       }
-      const result = await invoke("reload_vscode_window");
+      const result = await reloadVsCodeWindowCommand();
       setStatusText(result);
     } catch (err) {
       setStatusText(`重载失败: ${String(err)}`);
@@ -151,7 +156,7 @@ export function useRuntimeStatusActions(ctx) {
         setStatusText(`未检测到 ${settingsTargetName} 正在运行，无法注入 Hook。请先启动 ${settingsTargetShortName}。`);
         return;
       }
-      const result = await invoke("install_codex_hook", { editorTarget: settingsEditorTarget });
+      const result = await installCodexHookCommand(settingsEditorTarget);
       await refreshHookStatus(true, settingsEditorTarget);
       const info = await refreshCodexExtensionInfo(true);
       if (info?.currentVersion) {
@@ -220,16 +225,13 @@ export function useRuntimeStatusActions(ctx) {
         setStatusText(`未检测到 ${settingsTargetName} 正在运行。请先启动 ${settingsTargetShortName}，再执行一键注入。`);
         return;
       }
-      const installMsg = await invoke("install_codex_hook", { editorTarget: settingsEditorTarget });
+      const installMsg = await installCodexHookCommand(settingsEditorTarget);
       await refreshHookStatus(true, settingsEditorTarget);
       const info = await refreshCodexExtensionInfo(true);
       if (info?.currentVersion) {
         setHookVersionSnapshot(info.currentVersion);
       }
-      const restartMsg = await invoke("run_post_switch_action", {
-        strategy: "restart_extension_host",
-        editorTarget: settingsEditorTarget
-      });
+      const restartMsg = await runPostSwitchActionCommand("restart_extension_host", settingsEditorTarget);
       setPostSwitchStrategy("hook");
       setStatusText(
         `${installMsg} ${restartMsg} 已切换为方案2（Hook 提速版）。${info?.currentVersion ? `已记录扩展版本 ${info.currentVersion}。` : ""}`

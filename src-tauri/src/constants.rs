@@ -143,7 +143,7 @@ pub(crate) const LOGIN_ERROR_CAPTURE_SCRIPT: &str = r#"
   } catch (_) {}
 })();
 "#;
-pub(crate) const AUTH_ERROR_KEYWORDS: [&str; 9] = [
+pub(crate) const AUTH_ERROR_KEYWORDS: [&str; 11] = [
     "not logged in",
     "unauthorized",
     "forbidden",
@@ -152,7 +152,9 @@ pub(crate) const AUTH_ERROR_KEYWORDS: [&str; 9] = [
     "login required",
     "authentication",
     "401",
+    "402",
     "403",
+    "deactivated_workspace",
 ];
 pub(crate) const HARD_QUOTA_ERROR_KEYWORDS: [&str; 10] = [
     "usage_limit_exceeded",

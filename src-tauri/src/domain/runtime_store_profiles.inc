@@ -6,8 +6,13 @@ fn load_store() -> CmdResult<StoreData> {
     }
     let text = fs::read_to_string(&path).map_err(|e| format!("读取 profiles.json 失败: {e}"))?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    let mut data: StoreData =
-        serde_json::from_str(&text).map_err(|e| format!("解析 profiles.json 失败: {e}"))?;
+    if text.trim().is_empty() {
+        return reset_store_from_corrupt_text(&path, text);
+    }
+    let mut data: StoreData = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return reset_store_from_corrupt_text(&path, text),
+    };
     if data.profiles.is_empty() {
         data.profiles = BTreeMap::new();
     }
@@ -19,6 +24,65 @@ fn load_store() -> CmdResult<StoreData> {
     Ok(data)
 }
 
+fn reset_store_from_corrupt_text(path: &Path, text: &str) -> CmdResult<StoreData> {
+    if !text.trim().is_empty() {
+        let stamp = Utc::now().format("%Y%m%d%H%M%S");
+        let corrupt_path = path.with_file_name(format!("profiles.corrupt-{stamp}.json"));
+        let _ = fs::write(corrupt_path, text);
+    }
+
+    if let Some(mut restored) = try_restore_store_from_latest_backup(path) {
+        normalize_profile_order(&mut restored);
+        normalize_profile_support_in_store(&mut restored);
+        save_store(&restored)?;
+        return Ok(restored);
+    }
+
+    let data = StoreData::default();
+    save_store(&data)?;
+    Ok(data)
+}
+
+fn try_restore_store_from_latest_backup(path: &Path) -> Option<StoreData> {
+    let parent = path.parent()?;
+    let file_name = path.file_name()?.to_str()?;
+    let backup_prefix = format!("{file_name}.bak.");
+
+    let mut backup_files: Vec<PathBuf> = fs::read_dir(parent)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with(&backup_prefix))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    backup_files.sort_by(|a, b| {
+        let a_name = a.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        let b_name = b.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        b_name.cmp(a_name)
+    });
+
+    for backup_file in backup_files {
+        let text = match fs::read_to_string(&backup_file) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        if text.trim().is_empty() {
+            continue;
+        }
+        if let Ok(store) = serde_json::from_str::<StoreData>(text) {
+            return Some(store);
+        }
+    }
+
+    None
+}
+
 fn save_store(store: &StoreData) -> CmdResult<()> {
     ensure_dirs()?;
     let path = profiles_file()?;
@@ -27,7 +91,16 @@ fn save_store(store: &StoreData) -> CmdResult<()> {
     normalize_profile_support_in_store(&mut normalized);
     let text = serde_json::to_string_pretty(&normalized)
         .map_err(|e| format!("序列化 profiles.json 失败: {e}"))?;
-    fs::write(path, format!("{text}\n")).map_err(|e| format!("写入 profiles.json 失败: {e}"))
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, format!("{text}\n")).map_err(|e| format!("写入 profiles.json 临时文件失败: {e}"))?;
+    match fs::rename(&tmp, &path) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(&tmp, &path).map_err(|e| format!("替换 profiles.json 失败: {e}"))?;
+            let _ = fs::remove_file(&tmp);
+            Ok(())
+        }
+    }
 }
 
 fn list_profile_names(store: &StoreData) -> Vec<String> {

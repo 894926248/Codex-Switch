@@ -1,5 +1,13 @@
 import { useCallback } from "react";
-import { confirm, invoke, open } from "../../../adapters/tauri";
+import {
+  addSkillRepoCommand,
+  deleteSkillCommand,
+  installDiscoverySkillCommand,
+  openExternalUrlCommand,
+  removeSkillRepoCommand,
+  setSkillTargetsCommand,
+} from "../../../adapters/commands";
+import { confirm, open } from "../../../adapters/tauri";
 import { recomputeSkillsCatalog } from "../../../utils";
 
 export function useSkillsPanelActions(ctx) {
@@ -56,7 +64,7 @@ export function useSkillsPanelActions(ctx) {
     (skill) => {
       void (async () => {
         try {
-          await invoke("open_external_url", { url: skill.readmeUrl });
+          await openExternalUrlCommand(skill.readmeUrl);
           setStatusText(`已打开技能: ${skill.name}`);
         } catch (err) {
           setStatusText(`打开技能详情失败: ${String(err)}`);
@@ -73,7 +81,7 @@ export function useSkillsPanelActions(ctx) {
       }
       setSkillsDiscoveryInstallingIds((prev) => ({ ...prev, [skill.id]: true }));
       try {
-        await invoke("install_discovery_skill", {
+        await installDiscoverySkillCommand({
           repoOwner: skill.repoOwner,
           repoName: skill.repoName,
           repoBranch: skill.repoBranch,
@@ -117,10 +125,7 @@ export function useSkillsPanelActions(ctx) {
     const busyKey = "__add__";
     setSkillRepoActionBusyKeys((prev) => ({ ...prev, [busyKey]: true }));
     try {
-      const data = await invoke("add_skill_repo", {
-        repoInput,
-        branch: skillRepoBranch.trim() || "main",
-      });
+      const data = await addSkillRepoCommand(repoInput, skillRepoBranch.trim() || "main");
       setSkillReposManage(data);
       setSkillReposManageError(null);
       setSkillRepoInput("");
@@ -156,7 +161,7 @@ export function useSkillsPanelActions(ctx) {
       }
       setSkillRepoActionBusyKeys((prev) => ({ ...prev, [key]: true }));
       try {
-        const data = await invoke("remove_skill_repo", { owner: repo.owner, name: repo.name });
+        const data = await removeSkillRepoCommand(repo.owner, repo.name);
         setSkillReposManage(data);
         setSkillReposManageError(null);
         setStatusText(`已删除仓库: ${key}`);
@@ -184,7 +189,7 @@ export function useSkillsPanelActions(ctx) {
     (repo) => {
       void (async () => {
         try {
-          await invoke("open_external_url", { url: repo.repoUrl });
+          await openExternalUrlCommand(repo.repoUrl);
           setStatusText(`已打开仓库: ${repo.owner}/${repo.name}`);
         } catch (err) {
           setStatusText(`打开仓库失败: ${String(err)}`);
@@ -222,7 +227,7 @@ export function useSkillsPanelActions(ctx) {
         return recomputeSkillsCatalog(optimistic);
       });
       try {
-        const data = await invoke("set_skill_targets", {
+        const data = await setSkillTargetsCommand({
           skillId: skill.id,
           claude: nextClaude,
           codex: nextCodex,
@@ -258,7 +263,7 @@ export function useSkillsPanelActions(ctx) {
       }
       setSkillsBusyIds((prev) => ({ ...prev, [skill.id]: true }));
       try {
-        const data = await invoke("delete_skill", { skillId: skill.id });
+        const data = await deleteSkillCommand(skill.id);
         setSkillsCatalog(recomputeSkillsCatalog(data));
         setSkillsError(null);
         setStatusText(`已删除技能: ${skill.name}`);

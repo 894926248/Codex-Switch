@@ -60,6 +60,9 @@ fn refresh_profile_record_quota_with_timeout(
         return (record, false);
     }
 
+    let old_error = record.get("last_error").and_then(Value::as_str).map(String::from);
+    let old_is_auth_error = is_auth_error(old_error.as_deref());
+
     match fetch_quota_from_codex_home_with_timeout(&snapshot_dir, refresh_token, timeout_seconds) {
         Ok(quota) => {
             record.insert(
@@ -87,7 +90,16 @@ fn refresh_profile_record_quota_with_timeout(
             });
             record.insert("quota".to_string(), quota_value);
             record.insert("last_checked_at".to_string(), Value::String(now_iso()));
-            record.insert("last_error".to_string(), Value::Null);
+            if old_is_auth_error {
+                // Preserve auth errors (deactivated_workspace, 402, etc.)
+                // Token refresh can succeed but workspace is still broken.
+                // Only explicit re-login or manual clear should remove these.
+            } else {
+                record.insert("last_error".to_string(), Value::Null);
+            }
+            if refresh_token {
+                let _ = ensure_opencode_snapshot_from_codex_auth(&snapshot_dir);
+            }
             (record, true)
         }
         Err(err) => {
@@ -1072,9 +1084,41 @@ fn refresh_all_quota_internal(
 ) -> CmdResult<DashboardData> {
     let mut store = load_store()?;
     let names = list_profile_names(&store);
-    for name in names {
-        let _ = refresh_one_profile_quota(&mut store, &name, refresh_token);
+
+    let tasks: Vec<(String, Map<String, Value>)> = names
+        .iter()
+        .filter_map(|name| {
+            let record = store.profiles.get(name).and_then(Value::as_object).cloned()?;
+            Some((name.clone(), record))
+        })
+        .collect();
+
+    let results: Vec<(String, Map<String, Value>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = tasks
+            .into_iter()
+            .map(|(name, record)| {
+                s.spawn(move || {
+                    let (new_record, _refreshed) =
+                        refresh_profile_record_quota_with_timeout(
+                            &name,
+                            record,
+                            refresh_token,
+                            APP_SERVER_TIMEOUT_DEFAULT_SECONDS,
+                        );
+                    (name, new_record)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect()
+    });
+
+    for (name, record) in results {
+        store.profiles.insert(name, Value::Object(record));
     }
+
     save_store(&store)?;
     load_dashboard_internal_for_mode(true, mode)
 }
@@ -1082,9 +1126,41 @@ fn refresh_all_quota_internal(
 fn keepalive_all_internal() -> CmdResult<DashboardData> {
     let mut store = load_store()?;
     let names = list_profile_names(&store);
-    for name in names {
-        let _ = refresh_one_profile_quota(&mut store, &name, true);
+
+    let tasks: Vec<(String, Map<String, Value>)> = names
+        .iter()
+        .filter_map(|name| {
+            let record = store.profiles.get(name).and_then(Value::as_object).cloned()?;
+            Some((name.clone(), record))
+        })
+        .collect();
+
+    let results: Vec<(String, Map<String, Value>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = tasks
+            .into_iter()
+            .map(|(name, record)| {
+                s.spawn(move || {
+                    let (new_record, _refreshed) =
+                        refresh_profile_record_quota_with_timeout(
+                            &name,
+                            record,
+                            true,
+                            APP_SERVER_TIMEOUT_DEFAULT_SECONDS,
+                        );
+                    (name, new_record)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect()
+    });
+
+    for (name, record) in results {
+        store.profiles.insert(name, Value::Object(record));
     }
+
     store.last_keepalive_at = Some(Local::now().timestamp());
     save_store(&store)?;
     load_dashboard_internal(true)

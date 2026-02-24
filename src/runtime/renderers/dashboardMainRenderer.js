@@ -11,6 +11,7 @@ export function renderDashboardHeader(props) {
     autoRefreshOnStartup,
     autoSeamlessSwitch,
     onAddByLogin,
+    onKeepaliveNow,
     onRefreshAllQuota,
     onReloadVsCode,
     quotaQuerying,
@@ -45,6 +46,17 @@ export function renderDashboardHeader(props) {
           title: quotaQuerying ? "配额查询中..." : "刷新全部额度",
           "aria-label": quotaQuerying ? "配额查询中" : "刷新全部额度",
           children: /* @__PURE__ */ jsx("span", { className: quotaQuerying ? "icon-spin" : void 0, "aria-hidden": true, children: "↻" })
+        }
+      ),
+      /* @__PURE__ */ jsx(
+        "button",
+        {
+          className: "header-icon",
+          disabled: uiBusy,
+          onClick: () => void onKeepaliveNow(),
+          title: "手动保活（刷新全部账号 Token）",
+          "aria-label": "手动保活",
+          children: /* @__PURE__ */ jsx("span", { "aria-hidden": true, children: "🔑" })
         }
       )
     ] }),

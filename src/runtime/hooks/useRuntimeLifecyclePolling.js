@@ -1,5 +1,12 @@
 import { useEffect } from "react";
-import { invoke } from "../../adapters/tauri";
+import {
+  autoSwitchResetCommand,
+  autoSwitchTickCommand,
+  applyProfileCommand,
+  installCodexHookCommand,
+  keepaliveAllCommand,
+  threadRecoverTickCommand,
+} from "../../adapters/commands";
 import {
   AUTO_BUSY_RETRY_MS,
   AUTO_HOOK_VERSION_POLL_MS,
@@ -213,7 +220,7 @@ export function useRuntimeLifecyclePolling(ctx) {
       setBusy(true);
       const previousVersion = hookVersionSnapshot;
       try {
-        const result = await invoke("install_codex_hook");
+        const result = await installCodexHookCommand();
         await refreshHookStatus(true);
         const latestInfo = await refreshCodexExtensionInfo(true);
         const savedVersion = latestInfo?.currentVersion || currentVersion;
@@ -271,7 +278,7 @@ export function useRuntimeLifecyclePolling(ctx) {
     }
     if (!autoSeamlessSwitch) {
       seamlessRunningRef.current = false;
-      void invoke("auto_switch_reset").catch(() => {
+      void autoSwitchResetCommand().catch(() => {
       });
       setStatusText("无感换号已关闭。");
       return;
@@ -295,7 +302,7 @@ export function useRuntimeLifecyclePolling(ctx) {
         }
         seamlessRunningRef.current = true;
         try {
-          const result = await invoke("auto_switch_tick", { mode: activeAppMode });
+          const result = await autoSwitchTickCommand(activeAppMode);
           if (!cancelled && result.dashboard) {
             applyDashboard(result.dashboard);
           }
@@ -320,7 +327,7 @@ export function useRuntimeLifecyclePolling(ctx) {
               }
             } else if (switchedTo) {
               try {
-                const calibrated = await invoke("apply_profile", { name: switchedTo, mode: "opencode" });
+                const calibrated = await applyProfileCommand(switchedTo, "opencode");
                 if (!cancelled) {
                   applyDashboard(calibrated, `${baseMessage}（已自动执行一次手动切号校准）`);
                 }
@@ -356,7 +363,7 @@ export function useRuntimeLifecyclePolling(ctx) {
         seamlessTimerRef.current = null;
       }
       seamlessRunningRef.current = false;
-      void invoke("auto_switch_reset").catch(() => {
+      void autoSwitchResetCommand().catch(() => {
       });
     };
   }, [activeAppMode, autoSeamlessSwitch, applyDashboard, initialLoading, postSwitchStrategy, runPostSwitchStrategy, setActiveProfileByMode, setSelected, setStatusText, seamlessEnabledRef, seamlessTimerRef, seamlessRunningRef, busyRef, blockingRef]);
@@ -389,7 +396,7 @@ export function useRuntimeLifecyclePolling(ctx) {
         }
         threadRecoverRunningRef.current = true;
         try {
-          const result = await invoke("thread_recover_tick", { mode: activeAppMode });
+          const result = await threadRecoverTickCommand(activeAppMode);
           if (!cancelled && result.message && ["thread_recovered", "thread_recover_failed"].includes(result.action)) {
             setStatusText(result.message);
           }
@@ -430,7 +437,7 @@ export function useRuntimeLifecyclePolling(ctx) {
       }
       autoRunningRef.current = true;
       try {
-        const data = await invoke("keepalive_all");
+        const data = await keepaliveAllCommand();
         if (!cancelled) {
           applyDashboard(data, successText);
         }

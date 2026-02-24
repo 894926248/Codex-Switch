@@ -1,7 +1,17 @@
 import { useCallback, useMemo } from "react";
 import { KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { arrayMove, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
-import { invoke, listen, open } from "../../adapters/tauri";
+import {
+  addAccountByLoginCommand,
+  DASHBOARD_COMMANDS,
+  exportDataBackupCommand,
+  importDataBackupBase64Command,
+  invokeCommand,
+  keepaliveAllCommand,
+  refreshProfileQuotaCommand,
+  reorderProfilesCommand,
+} from "../../adapters/commands";
+import { listen, open } from "../../adapters/tauri";
 import {
   dashboardCurrentByMode,
   fileToBase64,
@@ -59,7 +69,7 @@ export function useDashboardCommandHandlers(ctx) {
         setStatusText(beforeText);
       }
       try {
-        const data = await invoke(command, args);
+        const data = await invokeCommand(command, args);
         applyDashboard(data, successText);
         return true;
       } catch (err) {
@@ -106,7 +116,7 @@ export function useDashboardCommandHandlers(ctx) {
         setBlockingMessage(msg);
         setStatusText(msg);
       });
-      const data = await invoke("add_account_by_login", {});
+      const data = await addAccountByLoginCommand();
       applyDashboard(data, finalLoginNotice ?? "添加账号完成");
       const matched =
         findProfileNameForCurrent(
@@ -154,7 +164,7 @@ export function useDashboardCommandHandlers(ctx) {
       setBlockingMessage(`正在切换账号: ${label}...`);
       try {
         const ok = await runDashboardCommand(
-          "apply_profile",
+          DASHBOARD_COMMANDS.applyProfile,
           { name: target, mode: activeAppMode },
           `已切换到账号: ${label}`,
           `正在切换账号: ${label}...`
@@ -167,11 +177,7 @@ export function useDashboardCommandHandlers(ctx) {
         );
         setBlockingMessage(`正在校准额度: ${label}...`);
         try {
-          const calibrated = await invoke("refresh_profile_quota", {
-            name: target,
-            refreshToken: false,
-            mode: activeAppMode,
-          });
+          const calibrated = await refreshProfileQuotaCommand(target, false, activeAppMode);
           applyDashboard(calibrated, `已切换到账号: ${label}`);
         } catch (err) {
           setStatusText(`已切换到账号: ${label}（额度校准失败: ${String(err)}）`);
@@ -205,7 +211,7 @@ export function useDashboardCommandHandlers(ctx) {
         return;
       }
       await runDashboardCommand(
-        "set_workspace_alias",
+        DASHBOARD_COMMANDS.setWorkspaceAlias,
         { name: target, alias: aliasInput.trim() || null },
         aliasInput.trim() ? `已更新工作空间别名: ${label}` : `已清除工作空间别名: ${label}`
       );
@@ -221,7 +227,7 @@ export function useDashboardCommandHandlers(ctx) {
       }
       const label = profileLabel(target);
       await runDashboardCommand(
-        "refresh_profile_quota",
+        DASHBOARD_COMMANDS.refreshProfileQuota,
         { name: target, refreshToken, mode: activeAppMode },
         `已刷新额度: ${label}`,
         `正在刷新额度: ${label}...`,
@@ -234,7 +240,7 @@ export function useDashboardCommandHandlers(ctx) {
   const onRefreshAllQuota = useCallback(
     async (refreshToken = true) => {
       await runDashboardCommand(
-        "refresh_all_quota",
+        DASHBOARD_COMMANDS.refreshAllQuota,
         { refreshToken, mode: activeAppMode },
         "已刷新全部账号额度",
         "正在刷新全部账号额度...",
@@ -257,7 +263,7 @@ export function useDashboardCommandHandlers(ctx) {
       return;
     }
     await runDashboardCommand(
-      "refresh_profiles_quota",
+      DASHBOARD_COMMANDS.refreshProfilesQuota,
       { names: targets, refreshToken: false, mode: "opencode" },
       `已刷新 ${targets.length} 个账号额度`,
       `启动自动查询：正在刷新其余 ${targets.length} 个账号额度...`,
@@ -282,7 +288,7 @@ export function useDashboardCommandHandlers(ctx) {
       if (!window.confirm(`确定删除账号配置 "${label}" 吗？`)) {
         return;
       }
-      const ok = await runDashboardCommand("delete_profile", { name: target }, `已删除账号: ${label}`);
+      const ok = await runDashboardCommand(DASHBOARD_COMMANDS.deleteProfile, { name: target }, `已删除账号: ${label}`);
       if (!ok) {
         return;
       }
@@ -316,7 +322,7 @@ export function useDashboardCommandHandlers(ctx) {
     setBusy(true);
     setStatusText("正在导出数据备份...");
     try {
-      const result = await invoke("export_data_backup", { outputDir });
+      const result = await exportDataBackupCommand(outputDir);
       setStatusText(`备份已导出：${result.archivePath}`);
       window.alert(`备份导出完成。\n\n文件：${result.archivePath}\n条目数：${result.fileCount}\n估算大小：${result.estimatedTotalBytes} 字节`);
     } catch (err) {
@@ -351,10 +357,7 @@ export function useDashboardCommandHandlers(ctx) {
       setStatusText("正在导入备份并恢复数据...");
       try {
         const archiveBase64 = await fileToBase64(file);
-        const result = await invoke("import_data_backup_base64", {
-          fileName: file.name,
-          archiveBase64,
-        });
+        const result = await importDataBackupBase64Command(file.name, archiveBase64);
         applyDashboard(result.dashboard, `备份恢复完成：已恢复 ${result.restoredCount} 个文件`);
         window.alert(`备份恢复完成。\n\n来源文件：${result.sourceFileName}\n已恢复条目：${result.restoredCount}\n恢复前备份：${result.safeguardArchivePath}`);
       } catch (err) {
@@ -378,7 +381,7 @@ export function useDashboardCommandHandlers(ctx) {
     sortSavingRef.current = true;
     setStatusText("正在保存排序...");
     try {
-      const data = await invoke("reorder_profiles", { names });
+      const data = await reorderProfilesCommand(names);
       if (!pendingSortNamesRef.current) {
         applyDashboard(data, "排序已保存");
       } else {
@@ -448,6 +451,19 @@ export function useDashboardCommandHandlers(ctx) {
     [activeAppMode, displayProfiles, filteredProfiles, queuePersistOrder, setDisplayProfiles]
   );
 
+  const onKeepaliveNow = useCallback(async () => {
+    setBusy(true);
+    setStatusText("正在手动保活（刷新全部账号 Token）...");
+    try {
+      const data = await keepaliveAllCommand();
+      applyDashboard(data, "手动保活完成，全部账号 Token 已刷新。");
+    } catch (err) {
+      setStatusText(`手动保活失败: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [applyDashboard, setBusy, setStatusText]);
+
   return {
     onAddByLogin,
     onApplySelected,
@@ -456,6 +472,7 @@ export function useDashboardCommandHandlers(ctx) {
     onExportDataBackup,
     onImportDataBackupClick,
     onImportDataBackupFileSelected,
+    onKeepaliveNow,
     onRefreshAllQuota,
     onRefreshSelectedQuota,
     onRefreshStartupQuota,

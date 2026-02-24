@@ -59,8 +59,11 @@ export function useRuntimeDerivedViewState(ctx) {
       return null;
     }
     const matched = dashboard.profiles.filter((profile) => profileMatchesCurrentIdentity(profile, modeCurrent));
-    return matched.length === 1 ? matched[0].name : null;
-  }, [dashboard, modeCurrent]);
+    if (matched.length === 1) {
+      return matched[0].name;
+    }
+    return currentProfileName;
+  }, [currentProfileName, dashboard, modeCurrent]);
 
   useEffect(() => {
     setSelected((prev) => {

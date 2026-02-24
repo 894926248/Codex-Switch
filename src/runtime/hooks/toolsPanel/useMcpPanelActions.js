@@ -1,5 +1,12 @@
 import { useCallback } from "react";
-import { confirm, invoke } from "../../../adapters/tauri";
+import {
+  addMcpServerCommand,
+  importExistingMcpCommand,
+  openExternalUrlCommand,
+  removeMcpServerCommand,
+  setMcpTargetsCommand,
+} from "../../../adapters/commands";
+import { confirm } from "../../../adapters/tauri";
 import { MCP_PRESET_OPTIONS } from "../../../constants";
 import { recomputeMcpManage } from "../../../utils";
 
@@ -163,7 +170,7 @@ export function useMcpPanelActions(ctx) {
     const busyKey = "__add__";
     setMcpBusyIds((prev) => ({ ...prev, [busyKey]: true }));
     try {
-      const data = await invoke("add_mcp_server", {
+      const data = await addMcpServerCommand({
         serverId: id,
         spec,
         claude: mcpFormClaudeEnabled,
@@ -243,11 +250,11 @@ export function useMcpPanelActions(ctx) {
               }
             : item
         ),
-      };
-      return recomputeMcpManage(optimistic);
-    });
+        };
+        return recomputeMcpManage(optimistic);
+      });
     try {
-      const data = await invoke("set_mcp_targets", {
+      const data = await setMcpTargetsCommand({
         serverId: server.id,
         claude: nextClaude,
         codex: nextCodex,
@@ -280,7 +287,7 @@ export function useMcpPanelActions(ctx) {
     }
     setMcpBusyIds((prev) => ({ ...prev, [server.id]: true }));
     try {
-      const data = await invoke("remove_mcp_server", { serverId: server.id });
+      const data = await removeMcpServerCommand(server.id);
       setMcpManage(recomputeMcpManage(data));
       setMcpManageError(null);
       setStatusText(`已删除 MCP: ${server.name || server.id}`);
@@ -304,7 +311,7 @@ export function useMcpPanelActions(ctx) {
       }
       void (async () => {
         try {
-          await invoke("open_external_url", { url: targetUrl });
+          await openExternalUrlCommand(targetUrl);
           setStatusText(`已打开 MCP 文档: ${server.name || server.id}`);
         } catch (err) {
           setStatusText(`打开 MCP 文档失败: ${String(err)}`);
@@ -317,7 +324,7 @@ export function useMcpPanelActions(ctx) {
   const onImportExistingMcp = useCallback(async () => {
     setMcpManageRefreshing(true);
     try {
-      const data = await invoke("import_existing_mcp");
+      const data = await importExistingMcpCommand();
       setMcpManage(recomputeMcpManage(data));
       setMcpManageError(null);
       setStatusText(`已导入已有 MCP 配置（${data.total} 个）`);

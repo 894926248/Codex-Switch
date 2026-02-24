@@ -390,8 +390,33 @@ export function findProfileNameForCurrent(
   if (exactCount === 1 && exactMatch) {
     return exactMatch;
   }
-  if (currentWorkspace && workspaceCount === 1 && workspaceMatch) {
-    return workspaceMatch;
+  if (currentWorkspace) {
+    if (workspaceCount === 1 && workspaceMatch) {
+      return workspaceMatch;
+    }
+    if (workspaceCount > 1) {
+      if (
+        fallbackProfileName &&
+        data.profiles.some(
+          (profile) =>
+            profile.name === fallbackProfileName &&
+            normalizeIdentityValue(profile.workspaceId) === currentWorkspace,
+        )
+      ) {
+        return fallbackProfileName;
+      }
+      if (
+        data.activeProfile &&
+        data.profiles.some(
+          (profile) =>
+            profile.name === data.activeProfile &&
+            normalizeIdentityValue(profile.workspaceId) === currentWorkspace,
+        )
+      ) {
+        return data.activeProfile;
+      }
+    }
+    return fallbackProfileName ?? data.activeProfile ?? null;
   }
   if (currentWorkspaceName && currentEmail && workspaceNameEmailCount === 1 && workspaceNameEmailMatch) {
     return workspaceNameEmailMatch;
@@ -414,10 +439,16 @@ export function profileMatchesCurrentIdentity(profile: ProfileView, current: Cur
   const profileEmail = normalizeIdentityValue(profile.email);
 
   if (currentWorkspace && profileWorkspace === currentWorkspace) {
-    if (!currentEmail || !profileEmail) {
+    if (!currentEmail) {
       return true;
     }
+    if (!profileEmail) {
+      return false;
+    }
     return profileEmail === currentEmail;
+  }
+  if (currentWorkspace) {
+    return false;
   }
   if (currentWorkspaceName && currentEmail && profileWorkspaceName === currentWorkspaceName && profileEmail === currentEmail) {
     return true;

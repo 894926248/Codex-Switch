@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { invoke } from "../../adapters/tauri";
+import { loadDashboardCommand } from "../../adapters/commands";
 import {
   LIVE_STATUS_BURST_COOLDOWN_MS,
   LIVE_STATUS_BURST_THRESHOLD,
@@ -47,7 +47,7 @@ export function useDashboardSync(ctx) {
       if (!previous) {
         return profile;
       }
-      const pick = (oldValue, nextValue) => oldValue !== void 0 ? oldValue : nextValue;
+      const pick = (oldValue, nextValue) => nextValue !== void 0 ? nextValue : oldValue;
       return {
         ...profile,
         fiveHourRemainingPercent: pick(previous.fiveHourRemainingPercent, profile.fiveHourRemainingPercent),
@@ -66,7 +66,7 @@ export function useDashboardSync(ctx) {
       if (!previousCurrent) {
         return current;
       }
-      const pick = (oldValue, nextValue) => oldValue !== void 0 ? oldValue : nextValue;
+      const pick = (oldValue, nextValue) => nextValue !== void 0 ? nextValue : oldValue;
       return {
         ...current,
         fiveHourRemainingPercent: pick(previousCurrent.fiveHourRemainingPercent, current.fiveHourRemainingPercent),
@@ -123,10 +123,7 @@ export function useDashboardSync(ctx) {
       setBusy(true);
       try {
         const mode = activeAppModeRef.current;
-        const task = invoke("load_dashboard", {
-          syncCurrent,
-          mode
-        });
+        const task = loadDashboardCommand(syncCurrent, mode);
         const data = mode === "opencode" ? await withTimeout(task, timeoutMs ?? 0, "加载账号") : await task;
         applyDashboard(data, msg);
         if (data.currentError) {
@@ -159,10 +156,7 @@ export function useDashboardSync(ctx) {
     liveStatusPollingRef.current = true;
     liveStatusNextFetchAtRef.current = now + LIVE_STATUS_FETCH_MIN_MS;
     try {
-      const data = await invoke("load_dashboard", {
-        syncCurrent: false,
-        mode: activeAppModeRef.current
-      });
+      const data = await loadDashboardCommand(false, activeAppModeRef.current);
       const nextSignature = buildDashboardSignature(data);
       if (nextSignature !== dashboardSignatureRef.current) {
         applyDashboard(data, void 0, { preserveQuotaFromCurrentDashboard: true });
